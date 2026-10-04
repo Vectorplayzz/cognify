@@ -1,0 +1,27 @@
+services:
+  api:
+    image: ghcr.io/engineer-man/piston
+    container_name: piston_api
+    restart: always
+    # Required by Piston: isolate creates a cgroup + namespaces per job.
+    privileged: true
+    working_dir: /piston
+    ports:
+      - "127.0.0.1:2000:2000"
+    volumes:
+      - /root/piston_runtime:/piston/packages:rw
+    environment:
+      # Per-job caps. Piston's defaults are -1 (unlimited), which lets one
+      # playground submission exhaust the shared VPS. Enforced through a
+      # per-job memory cgroup (real RSS), so the JVM and Go still start.
+      PISTON_RUN_MEMORY_LIMIT: "268435456"      # 256 MB
+      PISTON_COMPILE_MEMORY_LIMIT: "536870912"  # 512 MB (rustc, javac)
+      # Default is 64. With 2 vCPUs, more than a few simultaneous jobs only
+      # adds contention; extras queue inside Piston rather than failing.
+      PISTON_MAX_CONCURRENT_JOBS: "4"
+    # Whole-container ceiling as a backstop: job cgroups nest under it, so
+    # even worst-case concurrency (4 x 512 MB) cannot starve the host.
+    mem_limit: 3g
+    memswap_limit: 3g
+    cpus: 1.5
+    pids_limit: 1024

@@ -1,0 +1,39 @@
+# SearXNG configuration for Cognify's chatbot web search.
+# Self-hosted metasearch: aggregates public engines, needs no API key.
+use_default_settings: true
+
+server:
+  secret_key: "c4b87aedc7ffec66dddcaf65cc446c498157ff5f6bcd0ebd7b25e58f87a4de6c"
+  limiter: false          # no bot-limiting: only Cognify's backend calls this
+  image_proxy: false
+  # Only the backend on this host talks to it; it is bound to 127.0.0.1.
+  bind_address: "0.0.0.0"
+  port: 8080
+
+search:
+  safe_search: 1          # moderate filtering; this serves students
+  autocomplete: ""
+  default_lang: "en"
+  # The JSON API is off by default — the backend needs it.
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 10.0
+  pool_connections: 50

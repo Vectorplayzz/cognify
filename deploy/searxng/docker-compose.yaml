@@ -1,0 +1,15 @@
+# SearXNG — self-hosted metasearch behind the chatbot's web search.
+# The running container was started with an equivalent `docker run`; this
+# file reproduces it. Settings live in ../../searxng/settings.yml.
+#
+#   cd /var/www/cognify/deploy/searxng && docker compose up -d
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    # Loopback only: the API reaches it through /api/search/web.
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ../../searxng:/etc/searxng:rw
