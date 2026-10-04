@@ -83,7 +83,7 @@ export async function signInWithGoogle(accessToken: string): Promise<{ user: any
 
 async function apiFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
     // Defensive: catch missing IDs early
-    if (path.includes('undefined') || path.includes('null')) {
+    if (/\/(undefined|null|NaN)(\/|\?|$)/.test(path)) {
         const err = new Error(`API call with undefined/null path segment: ${path}`);
         console.error('[API] ❌', err.message);
         throw err;
@@ -107,6 +107,20 @@ export async function getCurrentUser() { return apiFetch('/auth/me'); }
 export async function getUser(googleId: string) { return apiFetch(`/users/${googleId}`); }
 export async function updateUserXp(userId: number, xp: number, rewards: string[]) {
     return apiFetch(`/users/${userId}/xp`, { method: 'PUT', body: JSON.stringify({ xp, rewards }) });
+}
+
+// ── Leaderboard ──
+export interface LeaderboardEntry {
+    id: number; rank: number; name: string; picture?: string | null;
+    xp: number; level: number; streak: number; isMe: boolean;
+}
+export interface LeaderboardResponse {
+    leaders: LeaderboardEntry[];
+    me: { rank: number; xp: number; level: number; streak: number } | null;
+    total: number;
+}
+export async function getLeaderboard(limit = 50): Promise<LeaderboardResponse> {
+    return apiFetch(`/leaderboard?limit=${limit}`);
 }
 
 // ── Roadmaps ──
@@ -250,7 +264,7 @@ export async function createNoteSource(data: {
 }
 
 export async function getNoteSources(noteId: number) {
-    return apiFetch(`/notes/${noteId}/sources`);
+    return apiFetch(`/notes/notes/${noteId}/sources`);
 }
 
 export async function createNote(data: {

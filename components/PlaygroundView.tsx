@@ -1,493 +1,426 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { aiService } from '../services/llamaService';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import CodeMirror from '@uiw/react-codemirror';
+import { tokyoNight } from '@uiw/codemirror-theme-tokyo-night';
+import { python } from '@codemirror/lang-python';
+import { javascript } from '@codemirror/lang-javascript';
+import { java } from '@codemirror/lang-java';
+import { cpp } from '@codemirror/lang-cpp';
+import { rust } from '@codemirror/lang-rust';
+import { go } from '@codemirror/lang-go';
+import { html } from '@codemirror/lang-html';
+import { keymap } from '@codemirror/view';
+import { Prec } from '@codemirror/state';
+import { AnimatePresence, motion } from 'motion/react';
+import { toast } from 'sonner';
 import {
-  LANGUAGES,
-  getLanguageById,
-  getFileName,
-  executeCode,
-  type LanguageConfig,
-  type ExecutionResult,
-} from '../services/codeExecutionService';
+    Brain, Check, ChevronDown, Copy, Eye, History, Keyboard, Play, RotateCcw, Sparkles, Terminal, Wand2, X,
+} from 'lucide-react';
+import { aiService } from '../services/llamaService';
+import { LANGUAGES, getLanguageById, getFileName, executeCode, type ExecutionResult } from '../services/codeExecutionService';
+import * as api from '../services/apiService';
+import { progressService } from '../services/progressService';
+import { useTheme } from '../lib/theme';
+import { timeAgo } from '../lib/format';
+import { cn } from '../lib/cn';
+import { Badge, Button, Kbd, Modal, Segmented, Spinner } from './ui';
+import Markdown from './ui/Markdown';
 
-// Simple markdown to HTML converter
-const renderMarkdown = (text: string): string => {
-  if (!text) return '';
-
-  let html = text
-    // Escape HTML first
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    // Headers
-    .replace(/^### (.*$)/gim, '<h3 class="text-lg font-bold text-indigo-300 mt-4 mb-2">$1</h3>')
-    .replace(/^## (.*$)/gim, '<h2 class="text-xl font-bold text-indigo-300 mt-4 mb-2">$1</h2>')
-    .replace(/^# (.*$)/gim, '<h1 class="text-2xl font-bold text-indigo-300 mt-4 mb-2">$1</h1>')
-    // Bold
-    .replace(/\*\*(.+?)\*\*/g, '<strong class="text-white font-bold">$1</strong>')
-    // Italic
-    .replace(/\*(.+?)\*/g, '<em class="text-slate-300">$1</em>')
-    // Code blocks
-    .replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre class="bg-slate-900 p-3 rounded-lg overflow-x-auto my-2"><code class="text-sm text-emerald-400 font-mono">$2</code></pre>')
-    // Inline code
-    .replace(/`([^`]+)`/g, '<code class="bg-slate-800 px-1.5 py-0.5 rounded text-xs text-indigo-300 font-mono">$1</code>')
-    // Lists
-    .replace(/^\* (.*$)/gim, '<li class="ml-4 text-slate-300 my-1">• $1</li>')
-    .replace(/^- (.*$)/gim, '<li class="ml-4 text-slate-300 my-1">• $1</li>')
-    .replace(/^\d+\. (.*$)/gim, '<li class="ml-4 text-slate-300 my-1 list-decimal">$1</li>')
-    // Line breaks
-    .replace(/\n\n/g, '</p><p class="text-slate-300 my-2">')
-    .replace(/\n/g, '<br/>');
-
-  return `<p class="text-slate-300 my-2">${html}</p>`;
+const LANG_STYLE: Record<string, { short: string; color: string }> = {
+    python: { short: 'PY', color: 'from-sky-500 to-blue-600' },
+    javascript: { short: 'JS', color: 'from-amber-400 to-yellow-500' },
+    java: { short: 'JV', color: 'from-orange-500 to-red-500' },
+    go: { short: 'GO', color: 'from-cyan-400 to-sky-500' },
+    rust: { short: 'RS', color: 'from-orange-600 to-amber-700' },
+    c: { short: 'C', color: 'from-slate-500 to-slate-700' },
+    cpp: { short: 'C++', color: 'from-blue-600 to-indigo-700' },
+    html: { short: '</>', color: 'from-pink-500 to-orange-500' },
 };
 
-type RightTab = 'console' | 'preview';
-type AiMode = 'idle' | 'insights' | 'generating';
+const extensionFor = (id: string) => {
+    switch (id) {
+        case 'python': return [python()];
+        case 'javascript': return [javascript()];
+        case 'java': return [java()];
+        case 'c': case 'cpp': return [cpp()];
+        case 'rust': return [rust()];
+        case 'go': return [go()];
+        case 'html': return [html()];
+        default: return [];
+    }
+};
+
+const DRAFT_KEY = (id: string) => `cognify_draft_${id}`;
+const LAST_LANG_KEY = 'cognify_playground_lang';
+
+function loadDraft(id: string): string {
+    try { return localStorage.getItem(DRAFT_KEY(id)) ?? getLanguageById(id)?.defaultCode ?? ''; } catch { return getLanguageById(id)?.defaultCode ?? ''; }
+}
+
+const LangChip: React.FC<{ id: string; size?: 'sm' | 'md' }> = ({ id, size = 'md' }) => {
+    const s = LANG_STYLE[id] || { short: '?', color: 'from-slate-500 to-slate-700' };
+    return (
+        <span className={cn('flex shrink-0 items-center justify-center rounded-md bg-gradient-to-br font-mono font-bold text-white', s.color, size === 'sm' ? 'h-5 min-w-5 px-1 text-[9px]' : 'h-6 min-w-6 px-1 text-[10px]')}>
+            {s.short}
+        </span>
+    );
+};
+
+type RightTab = 'console' | 'preview' | 'insights';
 
 const PlaygroundView: React.FC = () => {
-  const [languageId, setLanguageId] = useState('python');
-  const [code, setCode] = useState(LANGUAGES[0].defaultCode);
-  const [stdin, setStdin] = useState('');
-  const [output, setOutput] = useState('');
-  const [isExecuting, setIsExecuting] = useState(false);
-  const [rightTab, setRightTab] = useState<RightTab>('console');
-  const [aiMode, setAiMode] = useState<AiMode>('idle');
-  const [aiOutput, setAiOutput] = useState('');
-  const [genPrompt, setGenPrompt] = useState('');
-  const [showGenModal, setShowGenModal] = useState(false);
-  const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
+    const { theme } = useTheme();
+    const [languageId, setLanguageId] = useState(() => {
+        try { const l = localStorage.getItem(LAST_LANG_KEY); return l && getLanguageById(l) ? l : 'python'; } catch { return 'python'; }
+    });
+    const [code, setCode] = useState(() => loadDraft(languageId));
+    const [stdin, setStdin] = useState('');
+    const [showStdin, setShowStdin] = useState(false);
+    const [result, setResult] = useState<ExecutionResult | null>(null);
+    const [runMs, setRunMs] = useState<number | null>(null);
+    const [isExecuting, setIsExecuting] = useState(false);
+    const [rightTab, setRightTab] = useState<RightTab>(() => (getLanguageById(languageId)?.isWebLang ? 'preview' : 'console'));
+    const [aiMode, setAiMode] = useState<'idle' | 'insights' | 'generating'>('idle');
+    const [insights, setInsights] = useState('');
+    const [genOpen, setGenOpen] = useState(false);
+    const [genPrompt, setGenPrompt] = useState('');
+    const [langOpen, setLangOpen] = useState(false);
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const [history, setHistory] = useState<any[] | null>(null);
+    const [copied, setCopied] = useState(false);
+    const [previewDoc, setPreviewDoc] = useState(code);
 
-  const editorRef = useRef<HTMLTextAreaElement>(null);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const lineNumberRef = useRef<HTMLDivElement>(null);
+    const lang = getLanguageById(languageId) || LANGUAGES[0];
+    const runRef = useRef<() => void>(() => {});
 
-  const lang = getLanguageById(languageId) || LANGUAGES[0];
+    // Persist drafts per language.
+    useEffect(() => {
+        const t = setTimeout(() => { try { localStorage.setItem(DRAFT_KEY(languageId), code); } catch { /* quota */ } }, 400);
+        return () => clearTimeout(t);
+    }, [code, languageId]);
 
-  // Switch language
-  const handleLanguageChange = (id: string) => {
-    const newLang = getLanguageById(id);
-    if (newLang) {
-      setLanguageId(id);
-      setCode(newLang.defaultCode);
-      setOutput('');
-      setAiOutput('');
-      setExecutionResult(null);
-      setRightTab(newLang.isWebLang ? 'preview' : 'console');
-    }
-  };
+    // Debounced live preview for HTML.
+    useEffect(() => {
+        if (!lang.isWebLang) return;
+        const t = setTimeout(() => setPreviewDoc(code), 350);
+        return () => clearTimeout(t);
+    }, [code, lang.isWebLang]);
 
-  // Sync line numbers with editor scroll
-  const syncScroll = () => {
-    if (editorRef.current && lineNumberRef.current) {
-      lineNumberRef.current.scrollTop = editorRef.current.scrollTop;
-    }
-  };
+    const switchLanguage = (id: string) => {
+        const next = getLanguageById(id);
+        if (!next) return;
+        setLanguageId(id);
+        setCode(loadDraft(id));
+        setResult(null);
+        setRunMs(null);
+        setRightTab(next.isWebLang ? 'preview' : 'console');
+        setLangOpen(false);
+        try { localStorage.setItem(LAST_LANG_KEY, id); } catch { /* storage unavailable */ }
+    };
 
-  // Line count
-  const lineCount = code.split('\n').length;
+    const handleRun = useCallback(async () => {
+        if (lang.isWebLang) { setPreviewDoc(code); setRightTab('preview'); return; }
+        if (isExecuting) return;
+        setIsExecuting(true);
+        setResult(null);
+        setRightTab('console');
+        const started = performance.now();
+        try {
+            const r = await executeCode(languageId, code, stdin);
+            setResult(r);
+            setRunMs(Math.round(performance.now() - started));
+            const userId = progressService.getDbUserId();
+            if (userId) {
+                api.saveCodeRun({ user_id: userId, language: languageId, code, stdin, output: (r.stdout || '') + (r.stderr ? `\n${r.stderr}` : '') })
+                    .then(() => setHistory(null))
+                    .catch(() => {});
+            }
+        } finally {
+            setIsExecuting(false);
+        }
+    }, [lang.isWebLang, isExecuting, languageId, code, stdin]);
+    runRef.current = handleRun;
 
-  // ── Run Code ──
-  const handleRun = async () => {
-    if (lang.isWebLang) {
-      setRightTab('preview');
-      return;
-    }
-    setIsExecuting(true);
-    setOutput('⏳ Executing...\n');
-    setExecutionResult(null);
-    setRightTab('console');
-    try {
-      const result = await executeCode(languageId, code, stdin);
-      setExecutionResult(result);
+    const extensions = useMemo(() => [
+        ...extensionFor(languageId),
+        Prec.highest(keymap.of([{ key: 'Mod-Enter', run: () => { runRef.current(); return true; } }])),
+    ], [languageId]);
 
-      // Detect "not supported" message from the service layer
-      const isUnsupported =
-        !result.stdout &&
-        result.exitCode !== 0 &&
-        result.stderr.toLowerCase().includes('not supported');
+    const handleInsights = async () => {
+        if (aiMode !== 'idle') return;
+        setAiMode('insights');
+        setInsights('');
+        setRightTab('insights');
+        try {
+            await aiService.getDetailedInsights(code, lang.label, setInsights);
+        } catch (err: any) {
+            setInsights('');
+            toast.error('AI insights unavailable', { description: err?.message });
+        } finally {
+            setAiMode('idle');
+        }
+    };
 
-      if (isUnsupported) {
-        setOutput(`🚫 Language not supported yet\n\n${result.stderr}`);
-        return;
-      }
+    const handleGenerate = async () => {
+        if (!genPrompt.trim()) return;
+        setGenOpen(false);
+        setAiMode('generating');
+        const previous = code;
+        setCode('');
+        try {
+            await aiService.generateCode(genPrompt.trim(), lang.label, (text) => {
+                const m = text.match(/^\s*```[\w+-]*\n?([\s\S]*?)(```\s*)?$/);
+                setCode(m ? m[1] : text);
+            });
+            toast.success('Code generated', { description: 'Press Run (⌘/Ctrl + Enter) to try it.' });
+        } catch (err: any) {
+            setCode(previous);
+            toast.error('Generation failed', { description: err?.message });
+        } finally {
+            setAiMode('idle');
+            setGenPrompt('');
+        }
+    };
 
-      let out = '';
-      if (result.stdout) out += result.stdout;
-      if (result.stderr) out += (out ? '\n' : '') + `⚠️ STDERR:\n${result.stderr}`;
-      if (!out) out = '[No output]';
+    const openHistory = async () => {
+        setHistoryOpen(true);
+        const userId = progressService.getDbUserId();
+        if (!userId || history) return;
+        try { setHistory(await api.getCodeHistory(userId, 30)); } catch { setHistory([]); }
+    };
 
-      // Show execution location
-      const mode = result.version.includes('Browser') ? '🔒 Client-Side (Your Browser)' : '🌐 Server Sandbox';
-      out += `\n\n── ${mode} | ${result.language} ${result.version} | Exit: ${result.exitCode} ──`;
+    const copyCode = () => {
+        navigator.clipboard?.writeText(code).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
+    };
 
-      setOutput(out);
-    } catch (err: any) {
-      setOutput(`❌ Execution Error:\n${err.message || err}`);
-    } finally {
-      setIsExecuting(false);
-    }
-  };
+    const resetCode = () => {
+        setCode(lang.defaultCode);
+        toast('Reset to the starter template');
+    };
 
-  // ── AI Insights (streaming) ──
-  const handleInsights = async () => {
-    if (aiMode === 'insights') return;
-    setAiMode('insights');
-    setAiOutput('');
-    try {
-      await aiService.getDetailedInsights(code, lang.label, (text) => {
-        setAiOutput(text);
-      });
-    } catch (err: any) {
-      setAiOutput(`❌ Error: ${err.message || err}`);
-    } finally {
-      setAiMode('idle');
-    }
-  };
+    const exitOk = result && result.exitCode === 0 && !result.signal;
 
-  // ── AI Code Generation (streaming) ──
-  const handleGenerate = async () => {
-    if (!genPrompt.trim()) return;
-    setShowGenModal(false);
-    setAiMode('generating');
-    setAiOutput('');
-    setCode('');
-    try {
-      await aiService.generateCode(genPrompt.trim(), lang.label, (text) => {
-        // Strip markdown code fences if AI wraps them
-        let clean = text;
-        const fenceRegex = /^```[\w]*\n?([\s\S]*?)```$/;
-        const match = clean.match(fenceRegex);
-        if (match) clean = match[1];
-        setCode(clean);
-      });
-    } catch (err: any) {
-      setAiOutput(`❌ Generation Error: ${err.message || err}`);
-    } finally {
-      setAiMode('idle');
-      setGenPrompt('');
-    }
-  };
-
-  // Live preview for HTML
-  useEffect(() => {
-    if (lang.isWebLang && rightTab === 'preview' && iframeRef.current) {
-      iframeRef.current.srcdoc = code;
-    }
-  }, [code, rightTab, lang.isWebLang]);
-
-  // Handle Tab key in editor
-  const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      const target = e.target as HTMLTextAreaElement;
-      const start = target.selectionStart;
-      const end = target.selectionEnd;
-      const newCode = code.substring(0, start) + '  ' + code.substring(end);
-      setCode(newCode);
-      requestAnimationFrame(() => {
-        target.selectionStart = target.selectionEnd = start + 2;
-      });
-    }
-  };
-
-  return (
-    <div className="h-full flex flex-col gap-3" style={{ minHeight: 0 }}>
-      {/* ── Top Toolbar ── */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        {/* Left side: Language, Run button, AI buttons */}
-        <div className="flex items-center gap-3 flex-wrap">
-          {/* Language Selector */}
-          <div className="relative">
-            <select
-              value={languageId}
-              onChange={(e) => handleLanguageChange(e.target.value)}
-              className="appearance-none bg-slate-800/80 border border-slate-700 rounded-xl pl-10 pr-8 py-2.5 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all cursor-pointer hover:bg-slate-800"
-            >
-              {LANGUAGES.map(l => (
-                <option key={l.id} value={l.id}>{l.label}</option>
-              ))}
-            </select>
-            <i className={`${lang.iconPrefix || 'fas'} ${lang.icon} absolute left-3 top-1/2 -translate-y-1/2 text-indigo-400 text-sm`}></i>
-            <i className="fas fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-[10px]"></i>
-          </div>
-
-          {/* Client-side execution indicator */}
-          {lang.isWebLang ? (
-            <div className="flex items-center gap-1.5 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
-              <i className="fas fa-shield-halved text-emerald-400 text-[10px]"></i>
-              <span className="text-[10px] font-bold text-emerald-300 uppercase">Client-Side</span>
-            </div>
-          ) : (
-            <div className="flex items-center gap-1.5 px-2 py-1 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-              <i className="fas fa-server text-amber-400 text-[10px]"></i>
-              <span className="text-[10px] font-bold text-amber-300 uppercase">Server-Sandbox (Piston API)</span>
-            </div>
-          )}
-
-          {/* Run Button */}
-          <button
-            onClick={handleRun}
-            disabled={isExecuting}
-            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-5 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-emerald-500/10 hover:shadow-emerald-500/20"
-          >
-            <i className={`fas ${isExecuting ? 'fa-circle-notch animate-spin' : 'fa-play'}`}></i>
-            <span>{isExecuting ? 'Running...' : lang.isWebLang ? 'Preview' : 'Run Code'}</span>
-          </button>
-
-          {/* Generate Code Button */}
-          <button
-            onClick={() => setShowGenModal(true)}
-            disabled={aiMode !== 'idle'}
-            className="bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-violet-500/10"
-          >
-            <i className={`fas ${aiMode === 'generating' ? 'fa-circle-notch animate-spin' : 'fa-wand-magic-sparkles'}`}></i>
-            <span>{aiMode === 'generating' ? 'Generating...' : 'Generate'}</span>
-          </button>
-
-          {/* AI Insights Button */}
-          <button
-            onClick={handleInsights}
-            disabled={aiMode !== 'idle'}
-            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 transition-all shadow-lg shadow-indigo-500/10"
-          >
-            <i className={`fas ${aiMode === 'insights' ? 'fa-circle-notch animate-spin' : 'fa-brain'}`}></i>
-            <span>{aiMode === 'insights' ? 'Analyzing...' : 'AI Insights'}</span>
-          </button>
-        </div>
-
-        {/* File info */}
-        <div className="flex items-center gap-3 text-xs text-slate-500">
-          <span className="font-mono bg-slate-800/50 px-2 py-1 rounded">{getFileName(lang)}</span>
-          <span>{lineCount} lines</span>
-          {executionResult && (
-            <>
-              <span className={`px-2 py-0.5 rounded-full font-bold flex items-center gap-1 ${executionResult.version.includes('Browser')
-                ? 'bg-emerald-500/10 text-emerald-400'
-                : 'bg-amber-500/10 text-amber-400'
-                }`}>
-                {executionResult.version.includes('Browser') && <i className="fas fa-shield-halved text-[8px]"></i>}
-                {executionResult.version.includes('Server') && <i className="fas fa-server text-[8px]"></i>}
-                {executionResult.exitCode === 0 ? 'Success' : 'Error'}
-              </span>
-              <span className={`px-2 py-0.5 rounded-full font-bold ${executionResult.exitCode === 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'
-                }`}>
-                Exit {executionResult.exitCode}
-              </span>
-            </>
-          )}
-          {isExecuting && (
-            <span className="px-2 py-0.5 rounded-full font-bold bg-blue-500/10 text-blue-400 flex items-center gap-1">
-              <i className="fas fa-circle-notch animate-spin text-[8px]"></i>
-              Running...
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* ── Code Generation Modal ── */}
-      {showGenModal && (
-        <div className="animate-fade-in-up bg-violet-950/30 border border-violet-500/20 rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <i className="fas fa-wand-magic-sparkles text-violet-400"></i>
-            <span className="text-sm font-bold text-violet-300">AI Code Generator</span>
-            <span className="text-[10px] text-slate-500 ml-auto">Generating as {lang.label}</span>
-          </div>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={genPrompt}
-              onChange={(e) => setGenPrompt(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleGenerate()}
-              placeholder="Describe what you want... e.g. 'fibonacci sequence with memoization'"
-              className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-500"
-              autoFocus
-            />
-            <button
-              onClick={handleGenerate}
-              disabled={!genPrompt.trim()}
-              className="bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white px-5 py-2.5 rounded-lg text-sm font-bold transition-all"
-            >
-              Generate
-            </button>
-            <button
-              onClick={() => setShowGenModal(false)}
-              className="text-slate-400 hover:text-white px-3 py-2.5 rounded-lg hover:bg-slate-800 transition-all"
-            >
-              <i className="fas fa-times"></i>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ── Main Editor Area ── */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-3 min-h-0">
-        {/* ── Left: Code Editor ── */}
-        <div className="flex flex-col bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl shadow-black/20">
-          {/* Editor Header */}
-          <div className="px-4 py-2 bg-slate-800/80 border-b border-slate-700 flex justify-between items-center">
-            <div className="flex items-center gap-2">
-              <i className={`${lang.iconPrefix || 'fas'} ${lang.icon} text-indigo-400 text-xs`}></i>
-              <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">{getFileName(lang)}</span>
-            </div>
-            <div className="flex space-x-1.5">
-              <div className="w-2.5 h-2.5 rounded-full bg-red-500/60"></div>
-              <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/60"></div>
-              <div className="w-2.5 h-2.5 rounded-full bg-green-500/60"></div>
-            </div>
-          </div>
-
-          {/* Editor Body with Line Numbers */}
-          <div className="flex-1 flex overflow-hidden relative">
-            {/* Line Numbers */}
-            <div
-              ref={lineNumberRef}
-              className="py-4 pl-3 pr-2 bg-slate-900/50 text-right select-none overflow-hidden border-r border-slate-800/50 flex-shrink-0"
-              style={{ width: '50px' }}
-            >
-              {Array.from({ length: lineCount }, (_, i) => (
-                <div key={i} className="text-[11px] leading-[1.65rem] text-slate-600 font-mono">
-                  {i + 1}
+    return (
+        <div className="flex h-full flex-col gap-3 p-3 sm:p-4 lg:p-5">
+            {/* ── toolbar ── */}
+            <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                    <button
+                        onClick={() => setLangOpen((o) => !o)}
+                        className="flex h-10 items-center gap-2.5 rounded-xl border border-line bg-surface/80 pl-2 pr-3 text-sm font-medium transition hover:border-line-strong"
+                    >
+                        <LangChip id={languageId} />
+                        {lang.label}
+                        <ChevronDown className="size-4 text-subtle" />
+                    </button>
+                    <AnimatePresence>
+                        {langOpen && (
+                            <>
+                                <div className="fixed inset-0 z-30" onClick={() => setLangOpen(false)} />
+                                <motion.div
+                                    initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}
+                                    className="card absolute left-0 top-12 z-40 w-60 bg-elevated p-1.5"
+                                >
+                                    {LANGUAGES.map((l) => (
+                                        <button
+                                            key={l.id}
+                                            onClick={() => switchLanguage(l.id)}
+                                            className={cn('flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm transition hover:bg-sunken', l.id === languageId && 'bg-brand-500/10')}
+                                        >
+                                            <LangChip id={l.id} />
+                                            <span className="flex-1">{l.label}</span>
+                                            <span className="text-[11px] text-subtle">{l.isWebLang ? 'browser' : l.pistonVersion}</span>
+                                        </button>
+                                    ))}
+                                </motion.div>
+                            </>
+                        )}
+                    </AnimatePresence>
                 </div>
-              ))}
+
+                <Button variant="success" title="Run (Ctrl/⌘ + Enter)" onClick={handleRun} loading={isExecuting} icon={<Play className="size-4" fill="currentColor" />}>
+                    {lang.isWebLang ? 'Preview' : 'Run'}
+                </Button>
+                <Button variant="secondary" onClick={() => setGenOpen(true)} disabled={aiMode !== 'idle'} loading={aiMode === 'generating'} icon={<Wand2 className="size-4 text-brand-500" />}>
+                    <span className="hidden sm:inline">Generate</span>
+                </Button>
+                <Button variant="secondary" onClick={handleInsights} disabled={aiMode !== 'idle'} loading={aiMode === 'insights'} icon={<Brain className="size-4 text-cyan-500" />}>
+                    <span className="hidden sm:inline">AI review</span>
+                </Button>
+
+                <div className="ml-auto flex items-center gap-1">
+                    {lang.supportsStdin && (
+                        <Button variant={showStdin ? 'secondary' : 'ghost'} size="icon" onClick={() => setShowStdin((s) => !s)} title="Program input (stdin)">
+                            <Keyboard className="size-4" />
+                        </Button>
+                    )}
+                    <Button variant="ghost" size="icon" onClick={openHistory} title="Run history"><History className="size-4" /></Button>
+                    <Button variant="ghost" size="icon" onClick={copyCode} title="Copy code">{copied ? <Check className="size-4 text-emerald-500" /> : <Copy className="size-4" />}</Button>
+                    <Button variant="ghost" size="icon" onClick={resetCode} title="Reset to template"><RotateCcw className="size-4" /></Button>
+                </div>
             </div>
 
-            {/* Textarea */}
-            <textarea
-              ref={editorRef}
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              onScroll={syncScroll}
-              onKeyDown={handleEditorKeyDown}
-              className="flex-1 py-4 px-4 bg-transparent text-slate-300 font-mono text-[13px] leading-[1.65rem] resize-none focus:outline-none sidebar-scroll"
-              spellCheck={false}
-              wrap="off"
-            />
+            {/* ── generate prompt ── */}
+            <AnimatePresence>
+                {genOpen && (
+                    <motion.form
+                        initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+                        onSubmit={(e) => { e.preventDefault(); handleGenerate(); }}
+                        className="overflow-hidden"
+                    >
+                        <div className="card flex items-center gap-2 p-2">
+                            <Sparkles className="ml-2 size-4 shrink-0 text-brand-400" />
+                            <input
+                                autoFocus
+                                value={genPrompt}
+                                onChange={(e) => setGenPrompt(e.target.value)}
+                                placeholder={`Describe a ${lang.label} program… e.g. “fibonacci with memoization”`}
+                                className="h-9 flex-1 bg-transparent text-sm outline-none placeholder:text-subtle"
+                            />
+                            <Button type="submit" variant="primary" size="sm" disabled={!genPrompt.trim()}>Generate</Button>
+                            <Button type="button" variant="ghost" size="icon-sm" onClick={() => setGenOpen(false)}><X className="size-4" /></Button>
+                        </div>
+                    </motion.form>
+                )}
+            </AnimatePresence>
 
-            {/* Generating overlay */}
-            {aiMode === 'generating' && (
-              <div className="absolute top-2 right-2 flex items-center gap-2 bg-violet-600/20 border border-violet-500/30 rounded-lg px-3 py-1.5">
-                <i className="fas fa-circle-notch animate-spin text-violet-400 text-xs"></i>
-                <span className="text-xs font-bold text-violet-300">AI typing...</span>
-              </div>
-            )}
-          </div>
+            {/* ── editor + output ── */}
+            <div className="grid min-h-0 flex-1 grid-rows-[minmax(280px,1fr)_minmax(220px,1fr)] gap-3 lg:grid-cols-2 lg:grid-rows-1">
+                <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[var(--shadow-card)] dark:bg-[#1a1b26]">
+                    <div className="flex items-center justify-between border-b border-line px-4 py-2">
+                        <div className="flex items-center gap-2 font-mono text-xs text-subtle">
+                            <LangChip id={languageId} size="sm" /> {getFileName(lang)}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {aiMode === 'generating' && <Badge tone="brand" icon={<Spinner className="size-3" />}>AI is typing</Badge>}
+                            <Badge>{lang.isWebLang ? 'Runs in browser' : 'Sandboxed'}</Badge>
+                        </div>
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-hidden">
+                        <CodeMirror
+                            value={code}
+                            onChange={setCode}
+                            theme={theme === 'dark' ? tokyoNight : 'light'}
+                            extensions={extensions}
+                            height="100%"
+                            basicSetup={{ highlightActiveLineGutter: true, foldGutter: false, tabSize: 4 }}
+                            className="h-full"
+                        />
+                    </div>
+                    <AnimatePresence>
+                        {showStdin && lang.supportsStdin && (
+                            <motion.div initial={{ height: 0 }} animate={{ height: 'auto' }} exit={{ height: 0 }} className="overflow-hidden border-t border-line">
+                                <div className="p-3">
+                                    <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-subtle"><Keyboard className="size-3.5" /> stdin — one value per line</div>
+                                    <textarea
+                                        value={stdin}
+                                        onChange={(e) => setStdin(e.target.value)}
+                                        rows={3}
+                                        placeholder="Ada"
+                                        className="input resize-none font-mono text-xs"
+                                    />
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+                </div>
 
-          {/* Stdin Input */}
-          {lang.supportsStdin && (
-            <div className="px-4 py-2.5 bg-slate-800/50 border-t border-slate-700/50">
-              <div className="flex items-center gap-2">
-                <i className="fas fa-keyboard text-slate-500 text-xs"></i>
-                <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Stdin</span>
-              </div>
-              <input
-                type="text"
-                value={stdin}
-                onChange={(e) => setStdin(e.target.value)}
-                placeholder="Program input (one line, or use \\n for multiple lines)"
-                className="w-full mt-1.5 bg-slate-900 border border-slate-700/50 rounded-lg px-3 py-2 text-xs text-slate-300 font-mono placeholder:text-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              />
+                <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[var(--shadow-card)]">
+                    <div className="flex items-center justify-between gap-2 border-b border-line px-2 py-1.5">
+                        <Segmented<RightTab>
+                            size="sm"
+                            value={rightTab}
+                            onChange={setRightTab}
+                            className="border-0 bg-transparent"
+                            options={[
+                                { value: 'console', label: 'Console', icon: <Terminal /> },
+                                ...(lang.isWebLang ? [{ value: 'preview' as RightTab, label: 'Preview', icon: <Eye /> }] : []),
+                                { value: 'insights', label: 'AI review', icon: <Brain /> },
+                            ]}
+                        />
+                        {result && rightTab === 'console' && (
+                            <div className="flex items-center gap-1.5 pr-2">
+                                <Badge tone={exitOk ? 'success' : 'danger'}>{exitOk ? 'Success' : result.signal ? `Killed (${result.signal})` : `Exit ${result.exitCode}`}</Badge>
+                                {runMs != null && <Badge>{runMs} ms</Badge>}
+                            </div>
+                        )}
+                    </div>
+                    <div className="relative min-h-0 flex-1 overflow-auto">
+                        {rightTab === 'console' && (
+                            <div className="h-full bg-[#0b0b14] p-4 font-mono text-[13px] leading-relaxed">
+                                {isExecuting ? (
+                                    <div className="flex items-center gap-2 text-amber-300"><Spinner className="size-4 text-amber-300" /> Running {lang.label} in the sandbox…</div>
+                                ) : result ? (
+                                    <>
+                                        {result.stdout && <pre className="whitespace-pre-wrap text-[#e6e6f0]">{result.stdout}</pre>}
+                                        {result.stderr && <pre className="mt-2 whitespace-pre-wrap text-red-300">{result.stderr}</pre>}
+                                        {!result.stdout && !result.stderr && <span className="text-white/40">[no output]</span>}
+                                        <div className="mt-4 border-t border-white/10 pt-2 text-[11px] text-white/35">
+                                            {result.language} {result.version} · exit {result.exitCode ?? '—'}
+                                        </div>
+                                    </>
+                                ) : (
+                                    <div className="text-white/40">
+                                        <span className="text-emerald-400">$</span> ready — press <span className="text-white/70">Run</span> or <span className="text-white/70">⌘/Ctrl + Enter</span>
+                                        <div className="mt-3 text-[12px]">Sandbox: Python, JavaScript, Java, Go, Rust, C, C++ · Browser: HTML/CSS/JS</div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        {rightTab === 'preview' && lang.isWebLang && (
+                            <iframe sandbox="allow-scripts allow-modals" className="h-full w-full border-0 bg-white" title="Live preview" srcDoc={previewDoc} />
+                        )}
+                        {rightTab === 'insights' && (
+                            <div className="p-5">
+                                {insights ? (
+                                    <Markdown streaming={aiMode === 'insights'}>{insights}</Markdown>
+                                ) : aiMode === 'insights' ? (
+                                    <div className="flex items-center gap-2 text-sm text-muted"><Spinner className="size-4" /> Reviewing your code…</div>
+                                ) : (
+                                    <div className="flex flex-col items-center py-10 text-center">
+                                        <div className="flex size-12 items-center justify-center rounded-2xl bg-cyan-500/10 text-cyan-500"><Brain className="size-6" /></div>
+                                        <p className="mt-4 font-medium">Get a senior-engineer review</p>
+                                        <p className="mt-1 max-w-xs text-sm text-muted">Complexity, bugs, edge cases and readability scores for the code in the editor.</p>
+                                        <Button className="mt-5" variant="primary" icon={<Brain className="size-4" />} onClick={handleInsights}>Run AI review</Button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
             </div>
-          )}
+
+            {/* ── history ── */}
+            <Modal open={historyOpen} onClose={() => setHistoryOpen(false)} title="Run history" description="Your last 30 runs. Click one to load it into the editor." className="max-w-2xl">
+                <div className="-mx-2 max-h-[60vh] space-y-1.5 overflow-y-auto px-2">
+                    {history === null ? (
+                        [0, 1, 2].map((i) => <div key={i} className="skeleton h-16" />)
+                    ) : history.length === 0 ? (
+                        <p className="py-8 text-center text-sm text-subtle">No runs yet.</p>
+                    ) : history.map((h) => (
+                        <button
+                            key={h.id}
+                            onClick={() => {
+                                if (getLanguageById(h.language)) {
+                                    if (h.language !== languageId) switchLanguage(h.language);
+                                    setCode(h.code);
+                                    if (h.stdin) { setStdin(h.stdin); setShowStdin(true); }
+                                    setHistoryOpen(false);
+                                }
+                            }}
+                            className="flex w-full items-start gap-3 rounded-xl border border-line p-3 text-left transition hover:border-brand-500/40 hover:bg-sunken"
+                        >
+                            <LangChip id={h.language} />
+                            <div className="min-w-0 flex-1">
+                                <pre className="truncate font-mono text-xs text-ink">{String(h.code).split('\n').find((l: string) => l.trim()) || ''}</pre>
+                                <pre className="mt-1 truncate font-mono text-[11px] text-subtle">{String(h.output || '').split('\n')[0] || '[no output]'}</pre>
+                            </div>
+                            <span className="shrink-0 text-[11px] text-subtle">{timeAgo(h.created_at)}</span>
+                        </button>
+                    ))}
+                </div>
+            </Modal>
         </div>
-
-        {/* ── Right: Console / Preview + AI Insights ── */}
-        <div className="flex flex-col gap-3 min-h-0">
-          {/* Console / Preview Panel */}
-          <div className={`flex flex-col bg-black/80 border border-slate-800 rounded-xl overflow-hidden ${rightTab === 'preview' ? 'flex-[7]' : 'flex-1'}`}>
-            {/* Tab bar */}
-            <div className="px-3 py-1.5 bg-slate-900/80 border-b border-slate-800 flex items-center gap-1">
-              <button
-                onClick={() => setRightTab('console')}
-                className={`px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all ${rightTab === 'console'
-                  ? 'bg-slate-800 text-emerald-400'
-                  : 'text-slate-500 hover:text-slate-300'
-                  }`}
-              >
-                <i className="fas fa-terminal mr-1.5"></i>Console
-              </button>
-              {lang.isWebLang && (
-                <button
-                  onClick={() => setRightTab('preview')}
-                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all ${rightTab === 'preview'
-                    ? 'bg-slate-800 text-indigo-400'
-                    : 'text-slate-500 hover:text-slate-300'
-                    }`}
-                >
-                  <i className="fas fa-eye mr-1.5"></i>Live Preview
-                </button>
-              )}
-              {isExecuting && (
-                <div className="ml-auto flex items-center gap-1.5">
-                  <div className="w-2 h-2 rounded-full bg-emerald-400 online-pulse"></div>
-                  <span className="text-[10px] text-emerald-400 font-bold">Running</span>
-                </div>
-              )}
-            </div>
-
-            {/* Content */}
-            <div className="flex-1 overflow-auto">
-              {rightTab === 'console' ? (
-                <pre
-                  className={`p-4 font-mono text-sm whitespace-pre-wrap leading-relaxed ${output.startsWith('🚫') || output.startsWith('❌')
-                    ? 'text-red-400/90'
-                    : output.startsWith('⏳')
-                      ? 'text-yellow-400/80'
-                      : 'text-emerald-400/90'
-                    }`}
-                >
-                  {output || '$ Ready. Click "Run Code" to execute.\n\nClient-Side (no server): HTML/CSS/JS\nServer-Sandbox (Piston API): Python 3.12.0, JavaScript 20.11.1, Java 15.0.2, Go 1.16.2, Rust 1.68.2, C 10.2.0, C++ 10.2.0'}
-                </pre>
-              ) : (
-                <iframe
-                  ref={iframeRef}
-                  sandbox="allow-scripts allow-modals"
-                  className="w-full h-full bg-white border-0"
-                  title="Live Preview"
-                  srcDoc={code}
-                />
-              )}
-            </div>
-          </div>
-
-          {/* AI Insights Panel */}
-          <div className={`flex flex-col bg-indigo-950/20 border border-indigo-500/15 rounded-xl overflow-hidden ${rightTab === 'preview' ? 'flex-[3]' : 'flex-1'}`}>
-            <div className="px-4 py-2 bg-indigo-900/20 border-b border-indigo-500/15 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <i className="fas fa-brain text-indigo-400 text-xs"></i>
-                <span className="text-xs font-bold text-indigo-300 uppercase tracking-wider">AI Insights</span>
-              </div>
-              {aiMode === 'insights' && (
-                <div className="flex items-center gap-1.5">
-                  <i className="fas fa-circle-notch animate-spin text-indigo-400 text-[10px]"></i>
-                  <span className="text-[10px] text-indigo-400 font-bold">Streaming...</span>
-                </div>
-              )}
-            </div>
-            <div className="flex-1 p-4 overflow-auto sidebar-scroll">
-              {aiOutput ? (
-                <div
-                  className="text-sm leading-relaxed"
-                  dangerouslySetInnerHTML={{ __html: renderMarkdown(aiOutput) }}
-                />
-              ) : aiMode === 'insights' ? (
-                <div className="flex items-center gap-3 text-indigo-400 py-6">
-                  <i className="fas fa-circle-notch animate-spin text-xl"></i>
-                  <span className="text-sm">Cognify is analyzing your code...</span>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center py-8 text-center opacity-40">
-                  <i className="fas fa-brain text-4xl mb-3 text-indigo-500"></i>
-                  <p className="text-xs text-slate-400 max-w-[200px]">
-                    Click <b>"AI Insights"</b> for a detailed analysis with readability scores, complexity, and improvement suggestions.
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+    );
 };
 
 export default PlaygroundView;

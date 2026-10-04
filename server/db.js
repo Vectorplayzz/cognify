@@ -619,6 +619,50 @@ export async function initTables() {
         // Saved roadmaps keep where their content came from (roadmap.sh / AI).
         await addColumn('roadmaps', 'source', 'source JSON NULL');
 
+        // ── Cognify 2.0: streaks, server-side XP, larger text columns ──
+        await addColumn('users', 'last_active_date', 'last_active_date DATE NULL');
+        const ledgerExists = await executeQuery(connection, `
+            SELECT COUNT(*) AS count FROM information_schema.TABLES
+            WHERE table_schema = DATABASE() AND table_name = 'xp_ledger'
+        `, 'Check xp_ledger existence');
+        if (ledgerExists[0].count === 0) {
+            await executeQuery(connection, `
+                CREATE TABLE xp_ledger (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    topic_key VARCHAR(255) NOT NULL,
+                    level_id VARCHAR(255) NOT NULL,
+                    xp INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY unique_user_level (user_id, topic_key(150), level_id(150)),
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            `, 'Create xp_ledger');
+            const { backfillLedger } = await import('./services/gamification.js');
+            await backfillLedger(connection);
+            logDb('✓ Created and backfilled xp_ledger');
+        }
+        // TEXT caps at 64 KB and this server is not in strict mode, so long
+        // messages, outputs and lessons were silently truncated.
+        const widen = [
+            ['chat_messages', 'content', 'MEDIUMTEXT NOT NULL'],
+            ['room_messages', 'content', 'MEDIUMTEXT NOT NULL'],
+            ['code_history', 'code', 'MEDIUMTEXT NOT NULL'],
+            ['code_history', 'output', 'MEDIUMTEXT NULL'],
+            ['level_content', 'theory_content', 'MEDIUMTEXT NULL'],
+            ['notes', 'content', 'MEDIUMTEXT NULL'],
+        ];
+        for (const [table, column, type] of widen) {
+            const rows = await executeQuery(connection, `
+                SELECT DATA_TYPE AS t FROM information_schema.COLUMNS
+                WHERE table_schema = DATABASE() AND table_name = '${table}' AND column_name = '${column}'
+            `, `Check ${table}.${column} type`);
+            if (rows[0] && String(rows[0].t).toLowerCase() === 'text') {
+                await executeQuery(connection, `ALTER TABLE ${table} MODIFY ${column} ${type}`, `Widen ${table}.${column}`);
+                logDb(`✓ Widened ${table}.${column} to MEDIUMTEXT`);
+            }
+        }
+
         // ── Indexes ──
         logDb('=== Creating Indexes ===');
         const indexes = [

@@ -16,6 +16,8 @@ const TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 120000);
 // gateway going down does not take every AI feature with it.
 const FALLBACK_BASE_URL = (process.env.LLM_FALLBACK_BASE_URL || '').replace(/\/+$/, '');
 
+const STREAM_IDLE_MS = Number(process.env.LLM_STREAM_IDLE_MS || 60000);
+
 const MAX_MESSAGES = 60;
 const MAX_CONTENT_BYTES = 128 * 1024; // whole conversation
 
@@ -158,6 +160,12 @@ export async function proxyChat(payload, res) {
                             : `The AI provider returned an error (${upstream.status}).`,
                         { status: upstream.status === 429 ? 429 : 502, code: 'llm_upstream_error', detail }
                     );
+                    // Bad credentials are a property of the endpoint, not the
+                    // model: skip to the fallback endpoint, if any.
+                    if (upstream.status === 401 || upstream.status === 403) {
+                        console.warn(`[LLM] ${baseUrl} rejected credentials (${upstream.status}); trying next endpoint`);
+                        break;
+                    }
                     if (!isRetryableStatus(upstream.status)) throw lastError;
                     console.warn(`[LLM] ${model} @ ${baseUrl} returned ${upstream.status}; trying next`);
                     continue;
@@ -170,12 +178,28 @@ export async function proxyChat(payload, res) {
                         Connection: 'keep-alive',
                         'X-Accel-Buffering': 'no', // tell nginx not to buffer the stream
                     });
-                    await new Promise((resolve, reject) => {
-                        const node = Readable.fromWeb(upstream.body);
-                        node.on('error', reject);
-                        node.on('end', resolve);
-                        node.pipe(res);
-                    });
+                    // The overall deadline covers getting a first response; once
+                    // tokens flow, only a stall (no data for STREAM_IDLE_MS) aborts.
+                    clearTimeout(timer);
+                    let idle = setTimeout(() => controller.abort(), STREAM_IDLE_MS);
+                    try {
+                        await new Promise((resolve, reject) => {
+                            const node = Readable.fromWeb(upstream.body);
+                            node.on('data', () => {
+                                clearTimeout(idle);
+                                idle = setTimeout(() => controller.abort(), STREAM_IDLE_MS);
+                            });
+                            node.on('error', reject);
+                            node.on('end', resolve);
+                            node.pipe(res, { end: false });
+                        });
+                    } catch (err) {
+                        // Headers are sent: tell the client in-band instead of a silent cut.
+                        if (!res.writableEnded) res.write(`data: ${JSON.stringify({ error: { message: 'The AI stream was interrupted.' } })}\n\n`);
+                    } finally {
+                        clearTimeout(idle);
+                        if (!res.writableEnded) res.end();
+                    }
                     return;
                 }
 
@@ -196,3 +220,20 @@ export async function proxyChat(payload, res) {
 }
 
 export { ALLOWED_MODELS };
+
+// ── Reachability probe for /api/llm/status (cached; the route is public) ──
+let probeCache = { at: 0, value: null };
+export async function probe() {
+    if (probeCache.value && Date.now() - probeCache.at < 60000) return probeCache.value;
+    const results = [];
+    for (const baseUrl of endpoints()) {
+        try {
+            const r = await fetch(`${baseUrl}/models`, { headers: authHeaders(baseUrl), signal: AbortSignal.timeout(5000) });
+            results.push({ endpoint: baseUrl === BASE_URL ? 'primary' : 'fallback', ok: r.ok, status: r.status });
+        } catch (err) {
+            results.push({ endpoint: baseUrl === BASE_URL ? 'primary' : 'fallback', ok: false, status: 0 });
+        }
+    }
+    probeCache = { at: Date.now(), value: { reachable: results.some((r) => r.ok), endpoints: results } };
+    return probeCache.value;
+}

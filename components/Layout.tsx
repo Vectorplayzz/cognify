@@ -1,269 +1,270 @@
+import React, { useEffect, useState } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
+import { AnimatePresence, motion } from 'motion/react';
+import {
+    ChevronsLeft, ChevronsRight, Flame, LogOut, Moon, Search, Sun, Zap,
+} from 'lucide-react';
+import { useProgress } from '../services/progressService';
+import { useProfile } from '../lib/session';
+import { useTheme } from '../lib/theme';
+import { cn } from '../lib/cn';
+import { Avatar, Kbd } from './ui';
+import CommandPalette from './CommandPalette';
+import { NAV_ITEMS, useSignOut } from './nav';
+import Logo from './Logo';
 
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { googleLogout } from '@react-oauth/google';
-import { User } from '../types';
-import { progressService, REWARDS } from '../services/progressService';
-import { clearSession } from '../services/apiService';
+const SIDEBAR_KEY = 'cognify_sidebar_collapsed';
 
-interface LayoutProps {
-  children: React.ReactNode;
-  user: User;
-  activeTab: string;
-}
+const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+    const location = useLocation();
+    const profile = useProfile();
+    const { xp, level, rank, streak, levelProgress, xpToNext } = useProgress();
+    const { theme, toggle } = useTheme();
+    const signOut = useSignOut();
+    const [collapsed, setCollapsed] = useState(() => {
+        try { return localStorage.getItem(SIDEBAR_KEY) === '1'; } catch { return false; }
+    });
+    const [paletteOpen, setPaletteOpen] = useState(false);
+    const [menuOpen, setMenuOpen] = useState(false);
 
-const Layout: React.FC<LayoutProps> = ({ children, user, activeTab }) => {
-  const navigate = useNavigate();
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+    useEffect(() => {
+        try { localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0'); } catch { /* storage unavailable */ }
+    }, [collapsed]);
 
-  const handleLogout = () => {
-    googleLogout();
-    clearSession();
-    navigate('/');
-  };
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+                e.preventDefault();
+                setPaletteOpen((o) => !o);
+            }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, []);
 
-  const toggleSidebar = () => setSidebarOpen(prev => !prev);
+    useEffect(() => setMenuOpen(false), [location.pathname]);
 
-  const menuItems = [
-    { id: 'roadmap', icon: 'fa-map', label: 'Roadmap' },
-    { id: 'playground', icon: 'fa-code', label: 'Playground' },
-    { id: 'chatbot', icon: 'fa-robot', label: 'Tutor AI' },
-    { id: 'leaderboard', icon: 'fa-trophy', label: 'Leaderboard' },
-    { id: 'notes', icon: 'fa-book', label: 'Notes' },
-  ];
+    const current = NAV_ITEMS.find((n) => location.pathname.startsWith(n.to));
+    // Full-bleed views manage their own scrolling and padding.
+    const fullBleed = ['/playground', '/chatbot', '/notes'].some((p) => location.pathname.startsWith(p));
 
-  const earnedRewards = progressService.getEarnedRewards();
-  const nextReward = REWARDS.filter(r => r.xpThreshold > 0 && !earnedRewards.find(er => er.id === r.id))
-    .sort((a, b) => a.xpThreshold - b.xpThreshold)[0];
-  const nextRewardPercent = nextReward ? Math.min(100, Math.round((user.xp / nextReward.xpThreshold) * 100)) : 100;
+    return (
+        <div className="relative flex h-dvh overflow-hidden bg-bg">
+            {/* atmosphere */}
+            <div className="aurora pointer-events-none absolute inset-0 opacity-70" />
 
-  return (
-    <div className="flex h-screen overflow-hidden bg-slate-950">
-      {/* Sidebar */}
-      <aside
-        className={`sidebar-transition bg-slate-900 border-r border-slate-800 flex-col hidden md:flex ${sidebarOpen ? 'w-64' : 'w-[70px]'}`}
-      >
-        {/* Header with toggle */}
-        <div className={`p-4 flex items-center ${sidebarOpen ? 'justify-between' : 'justify-center'}`}>
-          {sidebarOpen && (
-            <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center">
-                <i className="fas fa-brain text-white text-xl"></i>
-              </div>
-               <span className="font-bold text-xl tracking-tight text-white">Cognify</span>
-            </div>
-          )}
-          <button
-            onClick={toggleSidebar}
-            className="w-9 h-9 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-all"
-            title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
-          >
-            <i className={`fas ${sidebarOpen ? 'fa-chevron-left' : 'fa-chevron-right'} text-sm`}></i>
-          </button>
-        </div>
-
-        {/* Navigation */}
-        <nav className="flex-1 px-3 py-4 space-y-1.5 sidebar-scroll overflow-y-auto">
-          {menuItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => navigate(`/${item.id}`)}
-              className={`w-full flex items-center ${sidebarOpen ? 'space-x-3 px-4' : 'justify-center px-0'} py-3 rounded-lg transition-all ${activeTab === item.id
-                ? 'bg-indigo-600/10 text-indigo-400 border border-indigo-600/20'
-                : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                }`}
-              title={!sidebarOpen ? item.label : undefined}
+            {/* ── Desktop sidebar ── */}
+            <motion.aside
+                animate={{ width: collapsed ? 76 : 256 }}
+                transition={{ type: 'spring', bounce: 0, duration: 0.35 }}
+                className="relative z-20 hidden shrink-0 flex-col border-r border-line bg-surface/60 backdrop-blur-xl md:flex"
             >
-              <i className={`fas ${item.icon} ${sidebarOpen ? '' : 'text-lg'}`}></i>
-              {sidebarOpen && <span className="font-medium">{item.label}</span>}
-            </button>
-          ))}
-
-          {/* ── Useful Content Section ── */}
-          {sidebarOpen && (
-            <div className="mt-6 space-y-3">
-              {/* Divider */}
-              <div className="border-t border-white/5 pt-4">
-                <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500 px-2">Insights</span>
-              </div>
-
-              {/* Daily Streak Card */}
-              <div className="animate-fade-in-up p-3 rounded-xl bg-gradient-to-br from-orange-500/10 to-red-500/5 border border-orange-500/10">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-orange-500/20 flex items-center justify-center">
-                    <i className="fas fa-fire text-orange-400"></i>
-                  </div>
-                  <div>
-                    <p className="text-xs text-slate-400">Daily Streak</p>
-                    <p className="text-lg font-extrabold text-orange-300">{user.streak} <span className="text-xs font-normal text-slate-500">days</span></p>
-                  </div>
+                <div className={cn('flex h-16 items-center gap-3 px-4', collapsed && 'justify-center px-0')}>
+                    <Logo compact={collapsed} />
                 </div>
-              </div>
 
-              {/* Quick Stats Card */}
-              <div className="animate-fade-in-up delay-100 p-3 rounded-xl bg-white/[0.02] border border-white/5">
-                <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-2">Quick Stats</p>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400"><i className="fas fa-bolt text-yellow-500 mr-1.5"></i>Total XP</span>
-                    <span className="text-xs font-bold text-indigo-300">{user.xp}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400"><i className="fas fa-layer-group text-cyan-500 mr-1.5"></i>Level</span>
-                    <span className="text-xs font-bold text-cyan-300">{user.level}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400"><i className="fas fa-shield-alt text-purple-500 mr-1.5"></i>Rank</span>
-                    <span className="text-xs font-bold text-purple-300">{user.rank}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Next Reward Milestone */}
-              {nextReward && (
-                <div className="animate-fade-in-up delay-200 p-3 rounded-xl bg-white/[0.02] border border-white/5">
-                  <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-2">Next Reward</p>
-                  <div className="flex items-center gap-2 mb-2">
-                    <i className={`fas ${nextReward.icon} text-indigo-400`}></i>
-                    <span className="text-xs font-semibold text-slate-300">{nextReward.name}</span>
-                  </div>
-                  <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-700"
-                      style={{ width: `${nextRewardPercent}%` }}
-                    ></div>
-                  </div>
-                  <p className="text-[10px] text-slate-500 mt-1">{user.xp}/{nextReward.xpThreshold} XP</p>
-                </div>
-              )}
-
-              {/* Earned Badges */}
-              {earnedRewards.length > 0 && (
-                <div className="animate-fade-in-up delay-300 p-3 rounded-xl bg-white/[0.02] border border-white/5">
-                  <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-2">Earned Badges</p>
-                  <div className="flex flex-wrap gap-2">
-                    {earnedRewards.map(r => (
-                      <div
-                        key={r.id}
-                        className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center"
-                        title={`${r.name}: ${r.description}`}
-                      >
-                        <i className={`fas ${r.icon} text-indigo-400 text-xs`}></i>
-                      </div>
+                <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-3">
+                    {!collapsed && <div className="eyebrow px-3 pb-2">Learn</div>}
+                    {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
+                        <NavLink
+                            key={to}
+                            to={to}
+                            title={collapsed ? label : undefined}
+                            className={({ isActive }) => cn(
+                                'group relative flex h-10 items-center gap-3 rounded-xl px-3 text-sm font-medium transition-colors',
+                                collapsed && 'justify-center px-0',
+                                isActive ? 'text-ink' : 'text-muted hover:bg-sunken hover:text-ink',
+                            )}
+                        >
+                            {({ isActive }) => (
+                                <>
+                                    {isActive && (
+                                        <motion.span
+                                            layoutId="nav-active"
+                                            className="absolute inset-0 rounded-xl border border-brand-500/25 bg-brand-500/10"
+                                            transition={{ type: 'spring', bounce: 0.2, duration: 0.45 }}
+                                        />
+                                    )}
+                                    <Icon className={cn('relative size-[18px] shrink-0', isActive ? 'text-brand-500 dark:text-brand-300' : 'text-subtle group-hover:text-muted')} />
+                                    {!collapsed && <span className="relative">{label}</span>}
+                                </>
+                            )}
+                        </NavLink>
                     ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+                </nav>
 
-          {/* Collapsed state: show icons for insights */}
-          {!sidebarOpen && (
-            <div className="mt-6 space-y-3 flex flex-col items-center">
-              <div className="border-t border-white/5 w-full pt-3"></div>
-              <div className="w-9 h-9 rounded-lg bg-orange-500/10 flex items-center justify-center" title={`Streak: ${user.streak} days`}>
-                <i className="fas fa-fire text-orange-400 text-sm"></i>
-              </div>
-              <div className="w-9 h-9 rounded-lg bg-indigo-500/10 flex items-center justify-center" title={`${user.xp} XP`}>
-                <i className="fas fa-bolt text-yellow-500 text-sm"></i>
-              </div>
-              {earnedRewards.length > 0 && (
-                <div className="w-9 h-9 rounded-lg bg-purple-500/10 flex items-center justify-center" title={`${earnedRewards.length} badges earned`}>
-                  <i className="fas fa-medal text-purple-400 text-sm"></i>
+                {/* level card */}
+                <div className="p-3">
+                    {collapsed ? (
+                        <div className="flex flex-col items-center gap-2">
+                            <div className="flex size-10 items-center justify-center rounded-xl bg-orange-500/10 text-orange-500" title={`${streak}-day streak`}>
+                                <Flame className="size-[18px]" />
+                            </div>
+                            <button onClick={() => setCollapsed(false)} className="flex size-10 items-center justify-center rounded-xl text-subtle hover:bg-sunken hover:text-ink" title="Expand sidebar">
+                                <ChevronsRight className="size-[18px]" />
+                            </button>
+                        </div>
+                    ) : (
+                        <>
+                            <div className="ring-gradient overflow-hidden rounded-2xl bg-elevated/80 p-4">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <div className="text-[11px] font-medium text-subtle">Level {level}</div>
+                                        <div className="text-sm font-semibold">{rank}</div>
+                                    </div>
+                                    <div className="flex items-center gap-1 rounded-full bg-orange-500/10 px-2 py-1 text-xs font-semibold text-orange-500">
+                                        <Flame className="size-3.5" /> {streak}
+                                    </div>
+                                </div>
+                                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-sunken">
+                                    <motion.div
+                                        className="h-full rounded-full bg-gradient-to-r from-brand-500 to-cyan-400"
+                                        initial={{ width: 0 }}
+                                        animate={{ width: `${levelProgress}%` }}
+                                        transition={{ duration: 0.9, ease: [0.22, 1, 0.36, 1] }}
+                                    />
+                                </div>
+                                <div className="mt-1.5 flex justify-between text-[11px] text-subtle">
+                                    <span>{xp.toLocaleString()} XP</span>
+                                    <span>{xpToNext} to L{level + 1}</span>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setCollapsed(true)}
+                                className="mt-2 flex h-9 w-full items-center gap-2 rounded-xl px-3 text-xs text-subtle transition hover:bg-sunken hover:text-ink"
+                            >
+                                <ChevronsLeft className="size-4" /> Collapse
+                            </button>
+                        </>
+                    )}
                 </div>
-              )}
-            </div>
-          )}
-        </nav>
+            </motion.aside>
 
-        {/* User Card */}
-        <div className="p-3 border-t border-white/5">
-          {sidebarOpen ? (
-            <>
-              <div className="flex items-center space-x-3 bg-white/[0.03] p-3 rounded-xl border border-white/5">
-                <img
-                  src={user.picture || localStorage.getItem('user_picture') || `https://picsum.photos/seed/${user.id}/40/40`}
-                  className="rounded-full w-10 h-10 object-cover ring-2 ring-indigo-500/30"
-                  alt="avatar"
-                />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold truncate text-white">{user.name}</p>
-                  <p className="text-xs text-slate-400">Level {user.level} {user.rank}</p>
-                </div>
-              </div>
-              <button
-                onClick={handleLogout}
-                className="group w-full mt-3 px-3 py-2.5 bg-white/[0.03] hover:bg-red-500/10 text-slate-400 hover:text-red-400 rounded-xl transition-all duration-300 text-sm font-medium border border-white/5 hover:border-red-500/20 flex items-center justify-center gap-2"
-              >
-                <i className="fas fa-sign-out-alt group-hover:translate-x-0.5 transition-transform duration-300"></i>
-                Sign Out
-              </button>
-            </>
-          ) : (
-            <div className="flex flex-col items-center space-y-2">
-              {console.log('[Layout] Rendering collapsed avatar, picture:', user.picture, 'localStorage:', localStorage.getItem('user_picture'))}
-              <img
-                src={user.picture || localStorage.getItem('user_picture') || `https://picsum.photos/seed/${user.id}/40/40`}
-                className="rounded-full w-9 h-9 object-cover ring-2 ring-indigo-500/30"
-                alt="avatar"
-                title={user.name}
-              />
-              <button
-                onClick={handleLogout}
-                className="w-9 h-9 flex items-center justify-center rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                title="Sign Out"
-              >
-                <i className="fas fa-sign-out-alt text-sm"></i>
-              </button>
+            {/* ── Main column ── */}
+            <div className="relative z-10 flex min-w-0 flex-1 flex-col">
+                <header className="flex h-16 shrink-0 items-center gap-3 border-b border-line bg-bg/60 px-4 backdrop-blur-xl sm:px-6">
+                    <div className="md:hidden"><Logo compact /></div>
+                    <div className="hidden min-w-0 items-center gap-2 md:flex">
+                        {current && <current.icon className="size-[18px] text-subtle" />}
+                        <h2 className="truncate text-sm font-semibold">{current?.label || 'Cognify'}</h2>
+                    </div>
+
+                    <button
+                        onClick={() => setPaletteOpen(true)}
+                        className="ml-auto flex h-9 items-center gap-2 rounded-xl border border-line bg-sunken/60 px-3 text-sm text-subtle transition hover:border-line-strong hover:text-muted md:ml-6 md:w-72"
+                    >
+                        <Search className="size-4" />
+                        <span className="hidden flex-1 text-left md:inline">Jump to…</span>
+                        <span className="hidden items-center gap-0.5 md:flex"><Kbd>⌘</Kbd><Kbd>K</Kbd></span>
+                    </button>
+
+                    <div className="flex items-center gap-1.5 md:ml-auto">
+                        <div className="hidden items-center gap-1.5 rounded-full border border-line bg-elevated/70 py-1 pl-1.5 pr-3 text-xs font-semibold sm:flex">
+                            <span className="flex size-6 items-center justify-center rounded-full bg-gradient-to-br from-amber-300 to-orange-500 text-white">
+                                <Zap className="size-3.5" fill="currentColor" />
+                            </span>
+                            {xp.toLocaleString()} XP
+                        </div>
+                        <div className="hidden items-center gap-1 rounded-full border border-line bg-elevated/70 px-3 py-1.5 text-xs font-semibold text-orange-500 sm:flex">
+                            <Flame className="size-3.5" /> {streak}d
+                        </div>
+                        <button
+                            onClick={toggle}
+                            className="flex size-9 items-center justify-center rounded-xl text-subtle transition hover:bg-sunken hover:text-ink"
+                            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+                        >
+                            <AnimatePresence mode="wait" initial={false}>
+                                <motion.span
+                                    key={theme}
+                                    initial={{ rotate: -90, opacity: 0 }}
+                                    animate={{ rotate: 0, opacity: 1 }}
+                                    exit={{ rotate: 90, opacity: 0 }}
+                                    transition={{ duration: 0.2 }}
+                                >
+                                    {theme === 'dark' ? <Sun className="size-[18px]" /> : <Moon className="size-[18px]" />}
+                                </motion.span>
+                            </AnimatePresence>
+                        </button>
+
+                        <div className="relative">
+                            <button onClick={() => setMenuOpen((o) => !o)} className="ml-1 flex items-center rounded-full ring-offset-2 ring-offset-bg transition hover:ring-2 hover:ring-brand-500/40">
+                                <Avatar src={profile?.picture} name={profile?.name} size={34} />
+                            </button>
+                            <AnimatePresence>
+                                {menuOpen && (
+                                    <>
+                                        <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+                                        <motion.div
+                                            initial={{ opacity: 0, y: -6, scale: 0.97 }}
+                                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                                            exit={{ opacity: 0, y: -6, scale: 0.97 }}
+                                            transition={{ duration: 0.15 }}
+                                            className="card absolute right-0 top-12 z-50 w-64 bg-elevated p-2"
+                                        >
+                                            <div className="flex items-center gap-3 px-2 py-2">
+                                                <Avatar src={profile?.picture} name={profile?.name} size={40} />
+                                                <div className="min-w-0">
+                                                    <div className="truncate text-sm font-semibold">{profile?.name || 'Learner'}</div>
+                                                    <div className="truncate text-xs text-subtle">{profile?.email}</div>
+                                                </div>
+                                            </div>
+                                            <div className="my-1 grid grid-cols-3 gap-1 px-1">
+                                                {[
+                                                    ['Level', level],
+                                                    ['XP', xp.toLocaleString()],
+                                                    ['Streak', `${streak}d`],
+                                                ].map(([k, v]) => (
+                                                    <div key={k as string} className="rounded-lg bg-sunken px-2 py-1.5 text-center">
+                                                        <div className="text-sm font-semibold">{v}</div>
+                                                        <div className="text-[10px] text-subtle">{k}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            <div className="my-1 h-px bg-line" />
+                                            <button onClick={signOut} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted transition hover:bg-red-500/10 hover:text-red-500">
+                                                <LogOut className="size-4" /> Sign out
+                                            </button>
+                                        </motion.div>
+                                    </>
+                                )}
+                            </AnimatePresence>
+                        </div>
+                    </div>
+                </header>
+
+                <main className={cn('relative min-h-0 flex-1', fullBleed ? 'overflow-hidden' : 'overflow-y-auto')}>
+                    <motion.div
+                        key={location.pathname.split('/')[1]}
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                        className={cn(fullBleed ? 'h-full' : 'mx-auto w-full max-w-7xl px-4 pb-16 pt-6 sm:px-6 md:pb-12 lg:px-10 lg:pt-10')}
+                    >
+                        {children}
+                    </motion.div>
+                </main>
+
+                {/* ── Mobile tab bar ── */}
+                <nav className="z-30 flex shrink-0 items-stretch justify-around border-t border-line bg-surface/90 px-1 pb-[max(env(safe-area-inset-bottom),0.25rem)] pt-1 backdrop-blur-xl md:hidden">
+                    {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
+                        <NavLink
+                            key={to}
+                            to={to}
+                            className={({ isActive }) => cn(
+                                'flex flex-1 flex-col items-center gap-0.5 rounded-xl py-1.5 text-[10px] font-medium transition-colors',
+                                isActive ? 'text-brand-500 dark:text-brand-300' : 'text-subtle',
+                            )}
+                        >
+                            <Icon className="size-5" />
+                            {label === 'Leaderboard' ? 'Ranks' : label.replace('AI ', '')}
+                        </NavLink>
+                    ))}
+                </nav>
             </div>
-          )}
+
+            <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
         </div>
-      </aside>
-
-      {/* Main Content */}
-      <main className="flex-1 flex flex-col relative overflow-hidden">
-        {/* Header */}
-        <header className="h-16 bg-slate-900/50 backdrop-blur-md border-b border-slate-800 px-6 flex items-center justify-between z-10">
-          <div className="flex items-center space-x-4">
-            <button onClick={toggleSidebar} className="md:hidden text-slate-400 hover:text-white transition-colors">
-              <i className="fas fa-bars"></i>
-            </button>
-            {/* Collapsed: show logo in header */}
-            {!sidebarOpen && (
-              <div className="hidden md:flex items-center space-x-2">
-                <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
-                  <i className="fas fa-brain text-white text-sm"></i>
-                </div>
-                 <span className="font-bold text-lg text-white">Cognify</span>
-              </div>
-            )}
-            <h2 className="text-lg font-semibold text-white capitalize">{activeTab}</h2>
-          </div>
-
-          <div className="flex items-center space-x-6">
-            <div className="flex items-center space-x-2 bg-indigo-900/20 px-3 py-1 rounded-full border border-indigo-500/30">
-              <i className="fas fa-bolt text-yellow-500"></i>
-              <span className="text-sm font-bold text-indigo-300">{user.xp} XP</span>
-            </div>
-            <div className="flex items-center space-x-2 text-slate-300">
-              <i className="fas fa-fire text-orange-500"></i>
-              <span className="text-sm font-bold">{user.streak} Days</span>
-            </div>
-            <button className="text-slate-400 hover:text-white transition-colors">
-              <i className="fas fa-bell"></i>
-            </button>
-            <button onClick={handleLogout} className="text-slate-400 hover:text-red-400 transition-colors" title="Sign Out">
-              <i className="fas fa-sign-out-alt"></i>
-            </button>
-          </div>
-        </header>
-
-        <div className="flex-1 overflow-y-auto p-6 bg-slate-950">
-          {children}
-        </div>
-      </main>
-    </div>
-  );
+    );
 };
 
 export default Layout;

@@ -13,8 +13,14 @@ import pdfParse from 'pdf-parse';
 import { fileURLToPath } from 'url';
 import { embedText, embedBatch, chunkText, EMBED_MODEL } from '../services/embeddingService.js';
 import { addToVectorDB, queryVectorDB } from '../vectorStore.js';
+import { rateLimit } from '../middleware/rateLimit.js';
+import { touchActivity } from '../services/gamification.js';
 
 const router = Router();
+
+// PDF parsing and embedding are CPU/IO heavy; keep them per-user bounded.
+const uploadLimiter = rateLimit({ windowMs: 60000, max: Number(process.env.NOTES_UPLOAD_RATE_LIMIT_PER_MIN || 10), keyPrefix: 'notes-upload' });
+const ragLimiter = rateLimit({ windowMs: 60000, max: Number(process.env.NOTES_RAG_RATE_LIMIT_PER_MIN || 30), keyPrefix: 'notes-rag' });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -40,7 +46,7 @@ export const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }
 //  FILE UPLOAD & TEXT EXTRACTION
 // ============================================
 
-router.post('/upload-files', upload.array('files', 5), async (req, res) => {
+router.post('/upload-files', uploadLimiter, upload.array('files', 5), async (req, res) => {
     try {
         const files = req.files;
         if (!files || files.length === 0) {
@@ -48,6 +54,7 @@ router.post('/upload-files', upload.array('files', 5), async (req, res) => {
         }
 
         const extracted = [];
+        const skipped = [];
 
         for (const file of files) {
             let text = '';
@@ -60,13 +67,20 @@ router.post('/upload-files', upload.array('files', 5), async (req, res) => {
                 } else if (ext === '.txt' || ext === '.md') {
                     text = file.buffer.toString('utf-8');
                 } else {
-                    continue; // skip unsupported
+                    skipped.push(file.originalname);
+                    continue; // unsupported type
                 }
 
                 // Trim to reasonable length
                 text = text.slice(0, 50000); // 50k chars max per file
             } catch (err) {
                 console.error('Extraction error:', err);
+                skipped.push(file.originalname);
+                continue;
+            }
+            if (!text.trim()) {
+                // e.g. a scanned PDF with no text layer
+                skipped.push(file.originalname);
                 continue;
             }
 
@@ -77,7 +91,10 @@ router.post('/upload-files', upload.array('files', 5), async (req, res) => {
             });
         }
 
-        res.json({ success: true, files: extracted });
+        if (extracted.length === 0) {
+            return res.status(422).json({ error: 'No readable text was found in those files.', skipped });
+        }
+        res.json({ success: true, files: extracted, skipped });
     } catch (err) {
         console.error('[Upload] error:', err);
         res.status(500).json({ error: 'File processing failed' });
@@ -88,7 +105,7 @@ router.post('/upload-files', upload.array('files', 5), async (req, res) => {
 //  RAG RETRIEVAL ENDPOINT
 // ============================================
 
-router.post('/retrieve', async (req, res) => {
+router.post('/retrieve', ragLimiter, async (req, res) => {
     try {
         const { query } = req.body || {};
         if (typeof query !== 'string' || !query.trim()) return res.status(400).json({ error: 'query required' });
@@ -114,7 +131,7 @@ router.post('/retrieve', async (req, res) => {
 //  NOTE SOURCES (with RAG indexing)
 // ============================================
 
-router.post('/sources', async (req, res) => {
+router.post('/sources', ragLimiter, async (req, res) => {
     try {
         const { noteId, type, title, content, metadata, sourceType, referenceId } = req.body || {};
         const userId = req.user.id;
@@ -203,6 +220,7 @@ router.post('/notes', async (req, res) => {
             return res.status(400).json({ error: 'title, type required' });
         }
         log('Notes', `Create note: "${title}" for user ${userId}`);
+        touchActivity(userId);
 
         const [result] = await pool.query(
             `INSERT INTO notes (user_id, title, type, content, summary, key_points)
@@ -288,8 +306,22 @@ router.get('/notes/:id', async (req, res) => {
 router.delete('/notes/:id', async (req, res) => {
     try {
         log('Notes', `Delete note ${req.params.id} user=${req.user.id}`);
-        const [result] = await pool.query('DELETE FROM notes WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
-        if (result.affectedRows === 0) return res.status(404).json({ error: 'Note not found' });
+        if (!(await ownsNote(req.user.id, req.params.id))) return res.status(404).json({ error: 'Note not found' });
+        // Sources used only by this note go too (their embeddings cascade),
+        // so deleted material can no longer surface in RAG retrieval.
+        const [linked] = await pool.query(
+            `SELECT l.source_id FROM note_source_links l
+             JOIN note_sources s ON s.id = l.source_id AND s.user_id = ?
+             WHERE l.note_id = ?
+               AND NOT EXISTS (SELECT 1 FROM note_source_links o WHERE o.source_id = l.source_id AND o.note_id <> l.note_id)`,
+            [req.user.id, req.params.id]
+        );
+        await pool.query('DELETE FROM notes WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+        const orphanIds = linked.map((r) => r.source_id);
+        if (orphanIds.length) {
+            await pool.query('DELETE FROM note_embeddings WHERE source_id IN (?)', [orphanIds]);
+            await pool.query('DELETE FROM note_sources WHERE id IN (?) AND user_id = ?', [orphanIds, req.user.id]);
+        }
         res.json({ success: true });
     } catch (err) {
         console.error('[API] Delete note error:', err);
@@ -300,13 +332,18 @@ router.delete('/notes/:id', async (req, res) => {
 router.put('/notes/:id', async (req, res) => {
     try {
         const { title, content, summary, keyPoints } = req.body || {};
+        // Only update the fields that were sent; omitted ones stay as they are.
+        const sets = [];
+        const vals = [];
+        if (typeof title === 'string' && title.trim()) { sets.push('title = ?'); vals.push(title.trim().slice(0, 255)); }
+        if (typeof content === 'string') { sets.push('content = ?'); vals.push(content); }
+        if (typeof summary === 'string') { sets.push('summary = ?'); vals.push(summary); }
+        if (Array.isArray(keyPoints)) { sets.push('key_points = ?'); vals.push(JSON.stringify(keyPoints)); }
+        if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
 
         const [result] = await pool.query(
-            `UPDATE notes SET
-             title = ?, content = ?, summary = ?, key_points = ?,
-             updated_at = CURRENT_TIMESTAMP
-             WHERE id = ? AND user_id = ?`,
-            [title, content, summary, JSON.stringify(keyPoints || []), req.params.id, req.user.id]
+            `UPDATE notes SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`,
+            [...vals, req.params.id, req.user.id]
         );
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Note not found' });
 

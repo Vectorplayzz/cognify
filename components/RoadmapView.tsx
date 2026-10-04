@@ -1,640 +1,429 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { motion } from 'motion/react';
+import { toast } from 'sonner';
+import {
+    ArrowLeft, ArrowRight, BookOpen, Check, Clock, Crown, ExternalLink, Flame, Layers, Lock, Map, Plus,
+    Rocket, Search, Sprout, Trash2, Zap,
+} from 'lucide-react';
 import { GeneratedRoadmap, RoadmapLevel, RoadmapSource } from '../types';
-import { progressService, REWARDS } from '../services/progressService';
+import { progressService, useProgress } from '../services/progressService';
+import { roadmapStore, toRoadmap, useRoadmaps } from '../services/roadmapStore';
 import * as api from '../services/apiService';
-import TopicSelector from './TopicSelector';
+import TopicSelector, { GeneratingOverlay } from './TopicSelector';
 import LevelView from './LevelView';
-
-const ROADMAP_CACHE_KEY = 'cognify_roadmaps';
-
-function getCachedRoadmaps(): GeneratedRoadmap[] {
-  try {
-    const stored = localStorage.getItem(ROADMAP_CACHE_KEY);
-    return stored ? JSON.parse(stored) : [];
-  } catch { return []; }
-}
-
-function setCachedRoadmaps(roadmaps: GeneratedRoadmap[]) {
-  try {
-    localStorage.setItem(ROADMAP_CACHE_KEY, JSON.stringify(roadmaps));
-  } catch (e) { console.warn('Failed to cache roadmaps:', e); }
-}
+import { Badge, Button, Card, EmptyState, PageHeader, ProgressBar, ProgressRing, stagger } from './ui';
+import { useConfirm } from './ui/useConfirm';
+import { cn } from '../lib/cn';
+import { timeAgo } from '../lib/format';
 
 type ViewState = 'topic-select' | 'roadmap' | 'level';
 
-const COMMUNITIES = [
-  { id: 'c1', name: 'AI Enthusiasts', members: 1243, color: 'from-violet-500 to-purple-600', icon: 'fa-robot', online: 42 },
-  { id: 'c2', name: 'Python Devs', members: 892, color: 'from-blue-500 to-cyan-600', icon: 'fa-python', iconPrefix: 'fab', online: 28 },
-  { id: 'c3', name: 'Cognify Study Group', members: 356, color: 'from-indigo-500 to-blue-600', icon: 'fa-brain', online: 15 },
-  { id: 'c4', name: 'DSA Warriors', members: 678, color: 'from-emerald-500 to-green-600', icon: 'fa-code', online: 31 },
-  { id: 'c5', name: 'Web Dev Hub', members: 1105, color: 'from-orange-500 to-red-600', icon: 'fa-globe', online: 53 },
-];
+const subtopicLabel = (s: any): string => (typeof s === 'string' ? s : s?.title || '');
 
-const CircularProgress: React.FC<{ percent: number; size?: number; strokeWidth?: number }> = ({
-  percent, size = 120, strokeWidth = 8,
-}) => {
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const offset = circumference - (percent / 100) * circumference;
-
-  return (
-    <div className="relative inline-flex items-center justify-center">
-      <svg width={size} height={size} className="transform -rotate-90">
-        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="rgba(51, 65, 85, 0.5)" strokeWidth={strokeWidth} />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          fill="none"
-          stroke="url(#progressGradient)"
-          strokeWidth={strokeWidth}
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={offset}
-          className="progress-ring-circle"
-          style={{ '--ring-circumference': `${circumference}`, '--ring-offset': `${offset}` } as React.CSSProperties}
-        />
-        <defs>
-          <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#818cf8" />
-            <stop offset="50%" stopColor="#a78bfa" />
-            <stop offset="100%" stopColor="#c084fc" />
-          </linearGradient>
-        </defs>
-      </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center text-white">
-        <span className="text-2xl font-bold">{Math.round(percent)}%</span>
-      </div>
-    </div>
-  );
+const SourceBadge: React.FC<{ source?: RoadmapSource | null }> = ({ source }) => {
+    if (source?.source === 'roadmap.sh') {
+        return (
+            <a href={source.sourceUrl || 'https://roadmap.sh'} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
+                <Badge tone="success" icon={<BookOpen className="size-3" />}>roadmap.sh <ExternalLink className="size-2.5" /></Badge>
+            </a>
+        );
+    }
+    if (source?.source === 'ai') return <Badge tone="brand" icon={<Zap className="size-3" />}>AI-generated</Badge>;
+    return null;
 };
 
 const RoadmapView: React.FC = () => {
-  const [viewState, setViewState] = useState<ViewState>('topic-select');
-  const [roadmaps, setRoadmaps] = useState<GeneratedRoadmap[]>(() => getCachedRoadmaps());
-  const [currentRoadmap, setCurrentRoadmap] = useState<GeneratedRoadmap | null>(null);
-  const [currentLevel, setCurrentLevel] = useState<RoadmapLevel | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [loadingHistory, setLoadingHistory] = useState(true);
-  const [progressVersion, setProgressVersion] = useState(0);
+    const [params, setParams] = useSearchParams();
+    const { roadmaps, loading: loadingHistory, loaded } = useRoadmaps();
+    const { progress } = useProgress();
+    const [viewState, setViewState] = useState<ViewState>('topic-select');
+    const [currentRoadmap, setCurrentRoadmap] = useState<GeneratedRoadmap | null>(null);
+    const [currentLevel, setCurrentLevel] = useState<RoadmapLevel | null>(null);
+    const [generatingTopic, setGeneratingTopic] = useState<string | null>(null);
+    const [filter, setFilter] = useState('');
+    const [confirmNode, confirm] = useConfirm();
 
-  // Load roadmaps + progress from DB on mount
-  useEffect(() => {
-    const loadRoadmaps = async () => {
-      const userId = progressService.getDbUserId();
-      if (!userId) {
-        setLoadingHistory(false);
-        return;
-      }
-      try {
-        // Load roadmaps
-        const saved = await api.getUserRoadmaps(userId);
-        const formatted: GeneratedRoadmap[] = saved.map((r: any) => ({
-          id: String(r.id),
-          topic: r.topic,
-          levels: Array.isArray(r.levels) ? r.levels : (typeof r.levels === 'string' ? JSON.parse(r.levels) : []),
-          createdAt: r.created_at || new Date().toISOString(),
-          dbId: r.id,
-          source: r.source || null
-        }));
-        setRoadmaps(formatted);
-        setCachedRoadmaps(formatted);
+    useEffect(() => { roadmapStore.load(); }, []);
 
-        // Load all progress and merge into localStorage
+    const openRoadmap = useCallback((roadmap: GeneratedRoadmap) => {
+        setCurrentRoadmap(roadmap);
+        setCurrentLevel(null);
+        setViewState('roadmap');
+    }, []);
+
+    const handleGenerate = useCallback(async (topic: string) => {
+        if (generatingTopic) return;
+        setGeneratingTopic(topic);
         try {
-          const allProgress = await api.getAllProgress(userId);
-          if (allProgress?.length) {
-            for (const p of allProgress) {
-              const roadmapId = String(p.roadmap_id);
-              const completedLevels = p.completed_levels || [];
-              const quizResults = p.quiz_results || [];
-              const matchingRoadmap = formatted.find(r => r.id === roadmapId);
-              if (matchingRoadmap && completedLevels.length > 0) {
-                const localProgress = progressService.getRoadmapProgress(roadmapId);
-                if (!localProgress || localProgress.completedLevels.length < completedLevels.length) {
-                  // DB has more progress — merge in
-                  const progress = progressService.getProgress();
-                  let rp = progress.roadmaps.find(r => r.roadmapId === roadmapId);
-                  if (!rp) {
-                    rp = { roadmapId, topic: matchingRoadmap.topic, completedLevels: [], quizResults: [] };
-                    progress.roadmaps.push(rp);
-                  }
-                  rp.completedLevels = completedLevels;
-                  rp.quizResults = quizResults;
-                  localStorage.setItem('cognify_progress', JSON.stringify(progress));
+            const userId = progressService.getDbUserId();
+
+            // 1. Reuse an existing roadmap for the same topic.
+            if (userId) {
+                try {
+                    const check = await api.checkRoadmapExists(userId, topic);
+                    if (check.exists && check.roadmap) {
+                        const existing = toRoadmap(check.roadmap);
+                        roadmapStore.upsert(existing);
+                        openRoadmap(existing);
+                        toast.info(`You already have a roadmap for “${existing.topic}”.`);
+                        return;
+                    }
+                } catch (err) {
+                    console.warn('Existing-roadmap check failed:', err);
                 }
-              }
             }
-            setProgressVersion(v => v + 1);
-          }
-        } catch (err) {
-          console.warn('Failed to load progress from DB:', err);
-        }
-      } catch (err) {
-        console.error('Failed to load roadmaps:', err);
-      } finally {
-        setLoadingHistory(false);
-      }
-    };
-    loadRoadmaps();
-  }, []);
 
-  const handleGenerate = async (topic: string) => {
-    setIsGenerating(true);
-    try {
-      const userId = progressService.getDbUserId();
-
-      // 1. FIRST check if roadmap already exists in DB (before generating)
-      let existingRoadmap = null;
-      if (userId) {
-        try {
-          const checkResult = await api.checkRoadmapExists(userId, topic);
-          if (checkResult.exists) {
-            // Use existing roadmap - no need to generate
-            // console.log(`Using existing roadmap for topic: ${topic}`);
-            existingRoadmap = {
-              id: String(checkResult.roadmap.id),
-              topic: checkResult.roadmap.topic,
-              levels: Array.isArray(checkResult.roadmap.levels) ? checkResult.roadmap.levels : (typeof checkResult.roadmap.levels === 'string' ? JSON.parse(checkResult.roadmap.levels) : []),
-              createdAt: checkResult.roadmap.created_at || new Date().toISOString(),
-              dbId: checkResult.roadmap.id,
-              source: checkResult.roadmap.source || null
+            // 2. Resolve: roadmap.sh first, AI fallback — same shape either way.
+            const resolved = await api.resolveRoadmap(topic);
+            const levels: RoadmapLevel[] = resolved.roadmap.levels;
+            const source: RoadmapSource = {
+                source: resolved.roadmap.source,
+                sourceSlug: resolved.roadmap.sourceSlug,
+                sourceUrl: resolved.roadmap.sourceUrl,
+                sourceProvider: resolved.roadmap.sourceProvider,
             };
-            setRoadmaps(prev => {
-              const updated = [existingRoadmap!, ...prev.filter(r => r.dbId !== checkResult.roadmap.id)];
-              setCachedRoadmaps(updated);
-              return updated;
-            });
-            setCurrentRoadmap(existingRoadmap);
-            setViewState('roadmap');
-            return; // Exit early - don't generate duplicate
-          }
-        } catch (checkErr) {
-          console.warn('Failed to check existing roadmap:', checkErr);
-          // Continue with generation if check fails
+
+            // 3. Save.
+            let created: GeneratedRoadmap;
+            if (userId) {
+                const saved = await api.createRoadmap({ topic, levels, source });
+                created = { ...toRoadmap(saved), source: saved.source || source };
+            } else {
+                created = { id: crypto.randomUUID(), topic, levels, createdAt: new Date().toISOString(), source };
+            }
+            roadmapStore.upsert(created);
+            openRoadmap(created);
+            toast.success(`Your ${created.topic} roadmap is ready`, { description: `${created.levels.length} levels to go.` });
+        } catch (error: any) {
+            console.error('Generation failed:', error);
+            toast.error('Couldn’t build that roadmap', { description: error?.message || 'Please try again in a moment.' });
+        } finally {
+            setGeneratingTopic(null);
         }
-      }
+    }, [generatingTopic, openRoadmap]);
 
-      // 2. Resolve the roadmap. The backend prefers roadmap.sh and falls
-      //    back to AI generation; either way the levels arrive ready to use.
-      const resolved = await api.resolveRoadmap(topic);
-      const levels: RoadmapLevel[] = resolved.roadmap.levels;
-      const source: RoadmapSource = {
-        source: resolved.roadmap.source,
-        sourceSlug: resolved.roadmap.sourceSlug,
-        sourceUrl: resolved.roadmap.sourceUrl,
-        sourceProvider: resolved.roadmap.sourceProvider,
-      };
-
-      // 2. Save to DB (handle duplicates)
-      let newRoadmap: GeneratedRoadmap;
-
-      if (userId) {
-        const saved = await api.createRoadmap({ topic, levels, source });
-
-        newRoadmap = {
-          id: String(saved.id),
-          topic: saved.topic,
-          levels: saved.levels,
-          createdAt: saved.created_at || new Date().toISOString(),
-          dbId: saved.id,
-          source: saved.source || source
-        };
-
-        if (saved.existing) {
-          console.log(`Using existing roadmap for topic: ${topic}`);
-          setRoadmaps(prev => {
-            const updated = [newRoadmap, ...prev.filter(r => r.dbId !== saved.id)];
-            setCachedRoadmaps(updated);
-            return updated;
-          });
-        } else {
-          setRoadmaps(prev => {
-            const updated = [newRoadmap, ...prev];
-            setCachedRoadmaps(updated);
-            return updated;
-          });
+    // Deep links: /roadmap?learn=<topic> builds one, /roadmap?open=<id> opens one.
+    useEffect(() => {
+        const learn = params.get('learn');
+        const open = params.get('open');
+        if (learn) {
+            setParams({}, { replace: true });
+            handleGenerate(learn);
+        } else if (open) {
+            const found = roadmaps.find((r) => r.id === open);
+            if (found) {
+                setParams({}, { replace: true });
+                openRoadmap(found);
+            } else if (loaded) {
+                setParams({}, { replace: true });
+            }
         }
-      } else {
-        newRoadmap = {
-          id: crypto.randomUUID(),
-          topic,
-          levels,
-          createdAt: new Date().toISOString(),
-          source
-        };
-        setRoadmaps(prev => {
-          const updated = [newRoadmap, ...prev];
-          setCachedRoadmaps(updated);
-          return updated;
+    }, [params, roadmaps, loaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const handleDeleteRoadmap = async (e: React.MouseEvent, roadmap: GeneratedRoadmap) => {
+        e.stopPropagation();
+        const ok = await confirm({
+            title: `Delete “${roadmap.topic}”?`,
+            description: 'Its lessons, quizzes and progress for this path will be removed. XP you already earned stays.',
+            confirmLabel: 'Delete roadmap',
+            danger: true,
         });
-      }
-
-      setCurrentRoadmap(newRoadmap);
-      setViewState('roadmap');
-    } catch (error: any) {
-      console.error('Generation failed:', error);
-      // The API returns a human-readable reason (unsupported topic, upstream
-      // outage, validation failure) — show it rather than a generic message.
-      alert(error?.message || 'Failed to generate roadmap. Please try again.');
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  const handleSelectRoadmap = (roadmap: GeneratedRoadmap) => {
-    setCurrentRoadmap(roadmap);
-    setViewState('roadmap');
-  };
-
-  const handleDeleteRoadmap = async (e: React.MouseEvent, id: string, dbId?: number) => {
-    e.stopPropagation();
-    if (confirm('Are you sure you want to delete this roadmap?')) {
-      if (dbId) {
-        try {
-          await api.deleteRoadmap(dbId);
-        } catch (err) {
-          console.error('Failed to delete roadmap:', err);
+        if (!ok) return;
+        if (roadmap.dbId) {
+            try {
+                await api.deleteRoadmap(roadmap.dbId);
+            } catch (err: any) {
+                toast.error('Delete failed', { description: err?.message });
+                return;
+            }
         }
-      }
-      setRoadmaps(prev => {
-        const updated = prev.filter(r => r.id !== id);
-        setCachedRoadmaps(updated);
-        return updated;
-      });
-      if (currentRoadmap?.id === id) {
-        setViewState('topic-select');
-        setCurrentRoadmap(null);
-      }
-    }
-  };
-
-  const handleLevelSelect = (level: RoadmapLevel) => {
-    setCurrentLevel(level);
-    setViewState('level');
-  };
-
-  // Called when user completes quiz / finishes level — proper state restoration
-  const handleLevelComplete = useCallback((levelId: string, xp: number) => {
-    if (!currentRoadmap) return;
-    progressService.completeLevel(
-      currentRoadmap.id,
-      currentRoadmap.topic,
-      levelId,
-      xp,
-      currentRoadmap.dbId
-    );
-    // Force re-render so unlock status updates
-    setProgressVersion(v => v + 1);
-  }, [currentRoadmap]);
-
-  const handleNextLevel = useCallback(() => {
-    if (!currentRoadmap || !currentLevel) return;
-    const idx = currentRoadmap.levels.findIndex(l => l.id === currentLevel.id);
-    if (idx >= 0 && idx < currentRoadmap.levels.length - 1) {
-      setCurrentLevel(currentRoadmap.levels[idx + 1]);
-    } else {
-      // Last level — go back to roadmap
-      setViewState('roadmap');
-      setCurrentLevel(null);
-    }
-  }, [currentRoadmap, currentLevel]);
-
-  const handleBack = useCallback(() => {
-    if (viewState === 'level') {
-      setCurrentLevel(null);
-      setViewState('roadmap');
-    } else if (viewState === 'roadmap') {
-      // Keep the current roadmap when going back to topic-select
-      const roadmapToKeep = currentRoadmap;
-      setViewState('topic-select');
-      // Restore the roadmap after state change
-      setTimeout(() => {
-        if (roadmapToKeep) {
-          setCurrentRoadmap(roadmapToKeep);
+        roadmapStore.remove(roadmap.id);
+        if (currentRoadmap?.id === roadmap.id) {
+            setViewState('topic-select');
+            setCurrentRoadmap(null);
         }
-      }, 0);
+        toast.success('Roadmap deleted');
+    };
+
+    const handleNextLevel = useCallback(() => {
+        if (!currentRoadmap || !currentLevel) return;
+        const idx = currentRoadmap.levels.findIndex((l) => l.id === currentLevel.id);
+        if (idx >= 0 && idx < currentRoadmap.levels.length - 1) {
+            setCurrentLevel(currentRoadmap.levels[idx + 1]);
+        } else {
+            setViewState('roadmap');
+            setCurrentLevel(null);
+        }
+    }, [currentRoadmap, currentLevel]);
+
+    const handleBack = useCallback(() => {
+        if (viewState === 'level') {
+            setCurrentLevel(null);
+            setViewState('roadmap');
+        } else {
+            setViewState('topic-select');
+        }
+    }, [viewState]);
+
+    useEffect(() => {
+        if ((viewState === 'roadmap' || viewState === 'level') && !currentRoadmap) {
+            setViewState('topic-select');
+            setCurrentLevel(null);
+        }
+    }, [viewState, currentRoadmap]);
+
+    // ── Level ──
+    if (viewState === 'level' && currentLevel && currentRoadmap) {
+        const idx = currentRoadmap.levels.findIndex((l) => l.id === currentLevel.id);
+        return (
+            <LevelView
+                key={currentLevel.id}
+                level={currentLevel}
+                levelNumber={idx + 1}
+                totalLevels={currentRoadmap.levels.length}
+                roadmapId={currentRoadmap.id}
+                roadmapDbId={currentRoadmap.dbId}
+                topic={currentRoadmap.topic}
+                onBack={handleBack}
+                onNext={handleNextLevel}
+                isLastLevel={idx === currentRoadmap.levels.length - 1}
+            />
+        );
     }
-  }, [viewState, currentRoadmap]);
 
-  // Recovery: if we're in a state that requires currentRoadmap but it's null, go back
-  useEffect(() => {
-    if ((viewState === 'roadmap' || viewState === 'level') && !currentRoadmap) {
-      setViewState('topic-select');
-      setCurrentLevel(null);
-    }
-  }, [viewState, currentRoadmap]);
+    // ── Roadmap detail ──
+    if (viewState === 'roadmap' && currentRoadmap) {
+        const rp = progress.roadmaps.find((r) => r.roadmapId === currentRoadmap.id);
+        const completed = new Set(rp?.completedLevels || []);
+        const total = currentRoadmap.levels.length;
+        const done = currentRoadmap.levels.filter((l) => completed.has(l.id)).length;
+        const pct = total ? Math.round((done / total) * 100) : 0;
+        const totalXp = currentRoadmap.levels.reduce((s, l) => s + (l.xpReward || 0), 0);
+        const nextIdx = currentRoadmap.levels.findIndex((l) => !completed.has(l.id));
 
-  // ── Render Views ──
-
-  if (viewState === 'topic-select') {
-    return (
-      <div className="max-w-4xl mx-auto py-8">
-        <TopicSelector onSelectTopic={handleGenerate} isLoading={isGenerating} />
-
-        {/* Saved Roadmaps List */}
-        <div className="mt-12">
-          <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
-            <i className="fas fa-history text-indigo-400"></i>
-            Your Learning Paths
-          </h3>
-
-          {loadingHistory ? (
-            <div className="text-center py-8 text-slate-500">
-              <i className="fas fa-circle-notch animate-spin mr-2"></i>
-              Loading roadmaps...
-            </div>
-          ) : roadmaps.length === 0 ? (
-            <div className="text-center py-12 bg-slate-800/30 rounded-2xl border border-slate-700/50 border-dashed">
-              <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
-                <i className="fas fa-map-signs text-slate-600 text-2xl"></i>
-              </div>
-              <p className="text-slate-400">No roadmaps generated yet.</p>
-              <p className="text-sm text-slate-500 mt-1">Select a topic above to start your journey!</p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {roadmaps.map(roadmap => {
-                const progress = progressService.getRoadmapProgress(roadmap.id);
-                const completed = progress?.completedLevels.length || 0;
-                const total = roadmap.levels.length;
-                const percent = Math.round((completed / total) * 100) || 0;
-
-                return (
-                  <div
-                    key={roadmap.id}
-                    onClick={() => handleSelectRoadmap(roadmap)}
-                    className="group bg-slate-800 hover:bg-slate-750 border border-slate-700 hover:border-indigo-500/50 rounded-xl p-5 cursor-pointer transition-all relative overflow-hidden"
-                  >
-                    <div className="absolute top-0 right-0 p-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button
-                        onClick={(e) => handleDeleteRoadmap(e, roadmap.id, roadmap.dbId)}
-                        className="text-slate-500 hover:text-red-400 transition-colors"
-                        title="Delete Roadmap"
-                      >
-                        <i className="fas fa-trash-alt"></i>
-                      </button>
-                    </div>
-
-                    <div className="flex justify-between items-start mb-4">
-                      <div>
-                        <h4 className="font-bold text-lg text-white mb-1 group-hover:text-indigo-300 transition-colors">
-                          {roadmap.topic}
-                        </h4>
-                        <p className="text-xs text-slate-400">{total} Levels • Generated by AI</p>
-                      </div>
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold ${percent === 100 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700 text-slate-300'
-                        }`}>
-                        {percent}%
-                      </div>
-                    </div>
-
-                    <div className="w-full bg-slate-700/50 h-1.5 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all duration-500 ${percent === 100 ? 'bg-emerald-500' : 'bg-indigo-500'}`}
-                        style={{ width: `${percent}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Detail / Level View ──
-
-  if (viewState === 'level' && currentLevel && currentRoadmap) {
-    const currentIdx = currentRoadmap.levels.findIndex(l => l.id === currentLevel.id);
-    const isLastLevel = currentIdx === currentRoadmap.levels.length - 1;
-    return (
-      <LevelView
-        level={currentLevel}
-        roadmapId={currentRoadmap.id}
-        roadmapDbId={currentRoadmap.dbId}
-        topic={currentRoadmap.topic}
-        onBack={handleBack}
-        onNext={handleNextLevel}
-        isLastLevel={isLastLevel}
-      />
-    );
-  }
-
-  if (viewState === 'roadmap' && currentRoadmap) {
-    const progress = progressService.getRoadmapProgress(currentRoadmap.id);
-    const completedCount = progress?.completedLevels.length || 0;
-    const totalLevels = currentRoadmap.levels.length;
-    const progressPercent = Math.round((completedCount / totalLevels) * 100);
-
-    return (
-      <div className="flex gap-6 h-full">
-        {/* Left: Roadmap Timeline */}
-        <div className="flex-1 max-w-4xl mx-auto py-6 animate-fade-in-up">
-          <div className="flex items-center gap-4 mb-8">
-            <button
-              onClick={handleBack}
-              className="w-10 h-10 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-all border border-slate-700"
-            >
-              <i className="fas fa-arrow-left"></i>
-            </button>
+        return (
             <div>
-              <h2 className="text-2xl font-bold text-white">{currentRoadmap.topic}</h2>
-              <p className="text-slate-400 text-sm">Your personalized learning path</p>
-            </div>
-          </div>
-
-          <div className="relative pl-8 border-l-2 border-slate-800 space-y-12 ml-4">
-            {currentRoadmap.levels.map((level, index) => {
-              const isCompleted = progressService.isLevelCompleted(currentRoadmap.id, level.id);
-              const isLocked = index > 0 && !progressService.isLevelCompleted(currentRoadmap.id, currentRoadmap.levels[index - 1].id);
-
-              return (
-                <div key={level.id} className="relative">
-                  <div className={`absolute -left-[41px] top-0 w-5 h-5 rounded-full border-4 transition-all ${isCompleted
-                    ? 'bg-emerald-500 border-emerald-900 shadow-[0_0_10px_rgba(16,185,129,0.5)]'
-                    : isLocked
-                      ? 'bg-slate-800 border-slate-700'
-                      : 'bg-indigo-500 border-indigo-900 shadow-[0_0_10px_rgba(99,102,241,0.5)]'
-                    }`}></div>
-
-                  <div
-                    onClick={() => !isLocked && handleLevelSelect(level)}
-                    className={`block p-6 rounded-xl border transition-all duration-300 group ${isLocked
-                      ? 'bg-slate-900/50 border-slate-800 opacity-60 cursor-not-allowed'
-                      : 'bg-slate-800/80 border-slate-700 hover:border-indigo-500/50 hover:shadow-lg hover:shadow-indigo-500/10 cursor-pointer transform hover:-translate-y-1'
-                      }`}
-                  >
-                    <div className="flex justify-between items-start mb-2">
-                      <span className={`text-xs font-bold uppercase tracking-wider ${isCompleted ? 'text-emerald-400' : isLocked ? 'text-slate-600' : 'text-indigo-400'
-                        }`}>
-                        Level {index + 1}
-                      </span>
-                      {isCompleted && <i className="fas fa-check-circle text-emerald-500"></i>}
-                      {isLocked && <i className="fas fa-lock text-slate-600"></i>}
-                    </div>
-                    <h3 className={`text-xl font-bold mb-2 ${isLocked ? 'text-slate-500' : 'text-white group-hover:text-indigo-200'}`}>
-                      {level.title}
-                    </h3>
-                    <p className={`text-sm mb-4 ${isLocked ? 'text-slate-600' : 'text-slate-400'}`}>
-                      {level.description}
-                    </p>
-                    <div className="flex items-center gap-4">
-                      {level.subtopics.map((sub, i) => (
-                        <span key={i} className={`text-xs px-2 py-1 rounded border ${isLocked
-                          ? 'bg-slate-800 border-slate-700 text-slate-600'
-                          : 'bg-slate-900 border-slate-700 text-slate-300'
-                          }`}>
-                          {sub}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Right: Progress Sidebar */}
-        <aside className="hidden lg:flex flex-col w-[300px] space-y-4 pt-20 animate-fade-in-up sidebar-scroll overflow-y-auto max-h-[calc(100vh-120px)]">
-          {/* Progress Ring */}
-          <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6 flex flex-col items-center">
-            <h3 className="text-sm font-bold text-slate-300 mb-4 uppercase tracking-wider">Roadmap Progress</h3>
-            <div className="animate-fade-in-up">
-              <CircularProgress percent={progressPercent} />
-            </div>
-            <div className="mt-4 text-center">
-              <div className="text-2xl font-bold text-white">{completedCount} / {totalLevels}</div>
-              <div className="text-xs text-slate-500">Levels Completed</div>
-            </div>
-          </div>
-
-          {/* Milestones */}
-          <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5 animate-fade-in-up delay-100">
-            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Milestones</h3>
-            <div className="space-y-3">
-              {[
-                { pct: 25, label: 'Getting Started', icon: 'fa-seedling', color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
-                { pct: 50, label: 'Halfway There', icon: 'fa-fire', color: 'text-orange-400', bg: 'bg-orange-500/10' },
-                { pct: 75, label: 'Almost Done', icon: 'fa-rocket', color: 'text-purple-400', bg: 'bg-purple-500/10' },
-                { pct: 100, label: 'Master', icon: 'fa-crown', color: 'text-yellow-400', bg: 'bg-yellow-500/10' },
-              ].map(m => {
-                const reached = progressPercent >= m.pct;
-                return (
-                  <div key={m.pct} className={`flex items-center gap-3 p-2.5 rounded-xl transition-all ${reached ? `${m.bg} border border-white/5` : 'opacity-40'}`}>
-                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${reached ? m.bg : 'bg-slate-800'}`}>
-                      <i className={`fas ${m.icon} ${reached ? m.color : 'text-slate-600'} text-sm`}></i>
-                    </div>
-                    <div className="flex-1">
-                      <p className={`text-xs font-bold ${reached ? 'text-white' : 'text-slate-500'}`}>{m.label}</p>
-                      <p className="text-[10px] text-slate-500">{m.pct}% completion</p>
-                    </div>
-                    {reached && <i className="fas fa-check-circle text-emerald-400 text-xs"></i>}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Analysis */}
-          <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5 animate-fade-in-up delay-200">
-            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Analysis</h3>
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-400"><i className="fas fa-clock text-blue-400 mr-1.5"></i>Est. Time</span>
-                <span className="text-xs font-bold text-blue-300">{totalLevels * 25} min</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-400"><i className="fas fa-bolt text-yellow-400 mr-1.5"></i>Total XP</span>
-                <span className="text-xs font-bold text-yellow-300">{currentRoadmap.levels.reduce((sum, l) => sum + (l.xpReward || 0), 0)}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-400"><i className="fas fa-layer-group text-cyan-400 mr-1.5"></i>Depth</span>
-                <span className="text-xs font-bold text-cyan-300">{totalLevels} levels</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-400"><i className="fas fa-book-open text-emerald-400 mr-1.5"></i>Source</span>
-                {currentRoadmap.source?.source === 'roadmap.sh' ? (
-                  <a
-                    href={currentRoadmap.source.sourceUrl || 'https://roadmap.sh'}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs font-bold text-emerald-300 hover:text-emerald-200 underline decoration-dotted underline-offset-2"
-                    title="Curriculum from roadmap.sh, the community-maintained developer roadmaps"
-                  >
-                    roadmap.sh <i className="fas fa-arrow-up-right-from-square text-[9px] ml-0.5"></i>
-                  </a>
-                ) : currentRoadmap.source?.source === 'ai' ? (
-                  <span className="text-xs font-bold text-emerald-300" title="No curated roadmap exists for this topic, so this one was generated by AI">
-                    AI-generated
-                  </span>
-                ) : (
-                  <span className="text-xs font-bold text-slate-500">—</span>
-                )}
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-400"><i className="fas fa-chart-line text-purple-400 mr-1.5"></i>Difficulty</span>
-                <span className="text-xs font-bold text-purple-300">
-                  {totalLevels <= 4 ? 'Beginner' : totalLevels <= 7 ? 'Intermediate' : 'Advanced'}
-                </span>
-              </div>
-              {/* Topic coverage bar */}
-              <div className="pt-2 border-t border-slate-700/50">
-                <p className="text-[10px] text-slate-500 mb-2">Coverage</p>
-                <div className="h-1.5 bg-slate-700/50 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-700"
-                    style={{ width: `${progressPercent}%` }}
-                  ></div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Community Chats */}
-          <div className="bg-slate-800/50 border border-slate-700 rounded-2xl overflow-hidden animate-fade-in-up delay-300">
-            <div className="px-5 py-3 border-b border-slate-700 bg-slate-800/80">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Community Hub</h3>
-            </div>
-            <div className="max-h-[300px] overflow-y-auto sidebar-scroll">
-              {COMMUNITIES.map((community) => (
-                <button
-                  key={community.id}
-                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-slate-700/50 transition-colors border-b border-slate-700/50 last:border-0"
-                  onClick={() => console.log(`Joined ${community.name}`)}
-                >
-                  <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${community.color} flex items-center justify-center shadow-lg`}>
-                    <i className={`${community.iconPrefix || 'fas'} ${community.icon} text-white text-xs`}></i>
-                  </div>
-                  <div className="flex-1 min-w-0 text-left">
-                    <div className="text-sm font-bold text-slate-200 truncate">{community.name}</div>
-                    <div className="text-[10px] text-slate-500">{community.members.toLocaleString()} members</div>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2 h-2 rounded-full bg-emerald-400 online-pulse"></div>
-                    <span className="text-[10px] font-mono text-emerald-400">{community.online}</span>
-                  </div>
+                {confirmNode}
+                <button onClick={handleBack} className="mb-6 inline-flex items-center gap-2 text-sm text-muted transition hover:text-ink">
+                    <ArrowLeft className="size-4" /> All roadmaps
                 </button>
-              ))}
-            </div>
-          </div>
-        </aside>
-      </div>
-    );
-  }
 
-  // Fallback — should not reach, redirect to topic-select
-  return (
-    <div className="flex items-center justify-center h-64">
-      <div className="text-center">
-        <i className="fas fa-circle-notch animate-spin text-2xl text-indigo-400 mb-4 block"></i>
-        <p className="text-slate-400 text-sm">Loading...</p>
-      </div>
-    </div>
-  );
+                <div className="grid gap-8 lg:grid-cols-[1fr_320px]">
+                    <div className="min-w-0">
+                        <div className="mb-8">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <SourceBadge source={currentRoadmap.source} />
+                                <Badge>{total} levels</Badge>
+                                {pct === 100 && <Badge tone="success" icon={<Crown className="size-3" />}>Mastered</Badge>}
+                            </div>
+                            <h1 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">{currentRoadmap.topic}</h1>
+                            <p className="mt-2 text-muted">Complete a level’s quiz to unlock the next one.</p>
+                            {nextIdx >= 0 && (
+                                <Button variant="primary" className="mt-5" onClick={() => { setCurrentLevel(currentRoadmap.levels[nextIdx]); setViewState('level'); }}>
+                                    {done === 0 ? 'Start level 1' : `Continue · Level ${nextIdx + 1}`} <ArrowRight className="size-4" />
+                                </Button>
+                            )}
+                        </div>
+
+                        {/* path */}
+                        <motion.ol variants={stagger.container} initial="hidden" animate="show" className="relative space-y-4">
+                            <div className="absolute bottom-6 left-[19px] top-6 w-0.5 rounded-full bg-line" />
+                            <motion.div
+                                className="absolute left-[19px] top-6 w-0.5 rounded-full bg-gradient-to-b from-emerald-400 to-brand-400"
+                                initial={{ height: 0 }}
+                                animate={{ height: `${total ? (done / total) * 100 : 0}%` }}
+                                transition={{ duration: 1, ease: [0.22, 1, 0.36, 1] }}
+                            />
+                            {currentRoadmap.levels.map((level, index) => {
+                                const isCompleted = completed.has(level.id);
+                                const isLocked = index > 0 && !completed.has(currentRoadmap.levels[index - 1].id);
+                                const isCurrent = !isCompleted && !isLocked;
+                                const subs = (level.subtopics || []).map(subtopicLabel).filter(Boolean);
+                                return (
+                                    <motion.li key={level.id} variants={stagger.item} className="relative flex gap-4">
+                                        <div className={cn(
+                                            'relative z-10 mt-4 flex size-10 shrink-0 items-center justify-center rounded-full border-2 text-sm font-semibold transition',
+                                            isCompleted && 'border-emerald-400 bg-emerald-400 text-white shadow-[0_0_20px_-2px_rgb(52_211_153/0.6)]',
+                                            isCurrent && 'border-brand-400 bg-bg text-brand-500 shadow-[0_0_24px_-2px_rgb(124_92_255/0.6)]',
+                                            isLocked && 'border-line-strong bg-bg text-subtle',
+                                        )}>
+                                            {isCompleted ? <Check className="size-5" strokeWidth={3} /> : isLocked ? <Lock className="size-4" /> : index + 1}
+                                            {isCurrent && <span className="absolute inset-0 animate-ping rounded-full border-2 border-brand-400/50" />}
+                                        </div>
+                                        <button
+                                            disabled={isLocked}
+                                            onClick={() => { setCurrentLevel(level); setViewState('level'); }}
+                                            className={cn(
+                                                'card group min-w-0 flex-1 p-5 text-left transition',
+                                                isLocked ? 'cursor-not-allowed opacity-55' : 'card-hover',
+                                                isCurrent && 'border-brand-500/40',
+                                            )}
+                                        >
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <div className={cn('eyebrow', isCurrent && 'text-brand-500', isCompleted && 'text-emerald-500')}>
+                                                        Level {index + 1}{isCurrent ? ' · Up next' : isCompleted ? ' · Complete' : ''}
+                                                    </div>
+                                                    <h3 className="mt-1.5 text-lg font-semibold tracking-tight">{level.title}</h3>
+                                                    {level.description && <p className="mt-1 line-clamp-2 text-sm text-muted">{level.description}</p>}
+                                                </div>
+                                                <Badge tone={isCompleted ? 'success' : 'warning'} icon={<Zap className="size-3" />} className="shrink-0">{level.xpReward} XP</Badge>
+                                            </div>
+                                            {subs.length > 0 && (
+                                                <div className="mt-4 flex flex-wrap gap-1.5">
+                                                    {subs.slice(0, 5).map((s, i) => (
+                                                        <span key={i} className="rounded-lg border border-line bg-sunken/70 px-2 py-0.5 text-xs text-muted">{s}</span>
+                                                    ))}
+                                                    {subs.length > 5 && <span className="px-1 py-0.5 text-xs text-subtle">+{subs.length - 5} more</span>}
+                                                </div>
+                                            )}
+                                        </button>
+                                    </motion.li>
+                                );
+                            })}
+                        </motion.ol>
+                    </div>
+
+                    {/* side panel */}
+                    <aside className="space-y-4 lg:sticky lg:top-0 lg:self-start">
+                        <Card className="flex flex-col items-center p-6 text-center">
+                            <ProgressRing value={pct} size={140} stroke={12}>
+                                <div className="text-3xl font-semibold tracking-tight">{pct}%</div>
+                                <div className="text-[11px] text-subtle">complete</div>
+                            </ProgressRing>
+                            <div className="mt-4 text-sm text-muted"><b className="text-ink">{done}</b> of {total} levels done</div>
+                        </Card>
+
+                        <Card className="p-5">
+                            <h3 className="eyebrow mb-4">At a glance</h3>
+                            <dl className="space-y-3 text-sm">
+                                {[
+                                    { icon: Clock, label: 'Est. time', value: `${Math.round(total * 25 / 60 * 10) / 10} h`, tone: 'text-sky-500' },
+                                    { icon: Zap, label: 'Total XP', value: totalXp.toLocaleString(), tone: 'text-amber-500' },
+                                    { icon: Layers, label: 'Difficulty', value: total <= 4 ? 'Beginner' : total <= 7 ? 'Intermediate' : 'Advanced', tone: 'text-brand-500' },
+                                    { icon: Map, label: 'Created', value: timeAgo(currentRoadmap.createdAt), tone: 'text-emerald-500' },
+                                ].map((r) => (
+                                    <div key={r.label} className="flex items-center justify-between">
+                                        <dt className="flex items-center gap-2 text-muted"><r.icon className={cn('size-4', r.tone)} />{r.label}</dt>
+                                        <dd className="font-semibold">{r.value}</dd>
+                                    </div>
+                                ))}
+                            </dl>
+                        </Card>
+
+                        <Card className="p-5">
+                            <h3 className="eyebrow mb-4">Milestones</h3>
+                            <div className="space-y-2">
+                                {[
+                                    { p: 25, label: 'Getting started', icon: Sprout },
+                                    { p: 50, label: 'Halfway there', icon: Flame },
+                                    { p: 75, label: 'Almost done', icon: Rocket },
+                                    { p: 100, label: 'Mastered', icon: Crown },
+                                ].map((m) => {
+                                    const reached = pct >= m.p;
+                                    return (
+                                        <div key={m.p} className={cn('flex items-center gap-3 rounded-xl p-2 transition', reached ? 'bg-emerald-500/10' : 'opacity-50')}>
+                                            <div className={cn('flex size-8 items-center justify-center rounded-lg', reached ? 'bg-emerald-500 text-white' : 'bg-sunken text-subtle')}>
+                                                <m.icon className="size-4" />
+                                            </div>
+                                            <div className="flex-1 text-sm font-medium">{m.label}</div>
+                                            <span className="text-xs text-subtle">{m.p}%</span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </Card>
+
+                        <Button variant="ghost" className="w-full text-red-500 hover:bg-red-500/10 hover:text-red-500" icon={<Trash2 className="size-4" />} onClick={(e) => handleDeleteRoadmap(e, currentRoadmap)}>
+                            Delete roadmap
+                        </Button>
+                    </aside>
+                </div>
+                {generatingTopic && <GeneratingOverlay topic={generatingTopic} />}
+            </div>
+        );
+    }
+
+    // ── Topic select + library ──
+    const shown = roadmaps.filter((r) => r.topic.toLowerCase().includes(filter.toLowerCase()));
+    return (
+        <div>
+            {confirmNode}
+            <TopicSelector onSelectTopic={handleGenerate} isLoading={!!generatingTopic} loadingTopic={generatingTopic || undefined} />
+
+            <div className="mt-14">
+                <PageHeader
+                    className="mb-5"
+                    title={<span className="text-xl sm:text-2xl">Your learning paths</span>}
+                    description={roadmaps.length ? `${roadmaps.length} roadmap${roadmaps.length === 1 ? '' : 's'} in your library` : undefined}
+                    actions={roadmaps.length > 3 && (
+                        <div className="relative">
+                            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-subtle" />
+                            <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter…" className="input h-9 w-48 pl-9" />
+                        </div>
+                    )}
+                />
+
+                {loadingHistory && roadmaps.length === 0 ? (
+                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{[0, 1, 2].map((i) => <div key={i} className="skeleton h-40" />)}</div>
+                ) : roadmaps.length === 0 ? (
+                    <EmptyState icon={<Map />} title="No roadmaps yet" description="Pick a topic above — your first path takes a few seconds." />
+                ) : (
+                    <motion.div variants={stagger.container} initial="hidden" animate="show" className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                        {shown.map((roadmap) => {
+                            const rp = progress.roadmaps.find((r) => r.roadmapId === roadmap.id);
+                            const doneCount = roadmap.levels.filter((l) => rp?.completedLevels.includes(l.id)).length;
+                            const total = roadmap.levels.length || 1;
+                            const pct = Math.round((doneCount / total) * 100);
+                            return (
+                                <motion.div
+                                    key={roadmap.id}
+                                    variants={stagger.item}
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={() => openRoadmap(roadmap)}
+                                    onKeyDown={(e) => e.key === 'Enter' && openRoadmap(roadmap)}
+                                    className="card card-hover group relative cursor-pointer p-5"
+                                >
+                                    <button
+                                        onClick={(e) => handleDeleteRoadmap(e, roadmap)}
+                                        className="absolute right-3 top-3 rounded-lg p-1.5 text-subtle opacity-0 transition hover:bg-red-500/10 hover:text-red-500 group-hover:opacity-100 focus:opacity-100"
+                                        title="Delete roadmap"
+                                    >
+                                        <Trash2 className="size-4" />
+                                    </button>
+                                    <div className="flex items-center gap-4">
+                                        <ProgressRing value={pct} size={54} stroke={5}>
+                                            {pct === 100 ? <Crown className="size-5 text-amber-500" /> : <span className="text-xs font-semibold">{pct}%</span>}
+                                        </ProgressRing>
+                                        <div className="min-w-0 pr-6">
+                                            <h4 className="truncate font-semibold group-hover:text-brand-600 dark:group-hover:text-brand-300">{roadmap.topic}</h4>
+                                            <p className="text-xs text-subtle">{doneCount}/{roadmap.levels.length} levels · {timeAgo(roadmap.createdAt)}</p>
+                                        </div>
+                                    </div>
+                                    <ProgressBar value={pct} tone={pct === 100 ? 'success' : 'brand'} className="mt-5" />
+                                    <div className="mt-4 flex items-center justify-between">
+                                        <SourceBadge source={roadmap.source} />
+                                        <span className="flex items-center gap-1 text-xs font-medium text-muted transition group-hover:text-ink">
+                                            {pct === 0 ? 'Start' : pct === 100 ? 'Review' : 'Continue'} <ArrowRight className="size-3.5" />
+                                        </span>
+                                    </div>
+                                </motion.div>
+                            );
+                        })}
+                        <motion.button
+                            variants={stagger.item}
+                            onClick={() => document.querySelector('main')?.scrollTo({ top: 0, behavior: 'smooth' })}
+                            className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-line-strong text-sm text-subtle transition hover:border-brand-500/50 hover:text-brand-500"
+                        >
+                            <Plus className="size-5" /> New roadmap
+                        </motion.button>
+                    </motion.div>
+                )}
+            </div>
+        </div>
+    );
 };
 
 export default RoadmapView;

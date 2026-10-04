@@ -105,9 +105,33 @@ app.use(express.json({ limit: '10mb' }));
 // API routes
 app.use('/api', apiRoutes);
 
-// Health check
+// Health check (also served as /api/health, which nginx exposes)
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ── Final error handler ──
+// Body-parser and multer errors would otherwise reach Express's default
+// handler, which answers with an HTML page the frontend cannot parse.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+    if (res.headersSent) return res.end();
+    let status = err.status || err.statusCode || 500;
+    let message = status < 500 ? (err.expose === false ? 'Bad request' : err.message) : 'Internal server error';
+    let code = err.code || err.type || 'error';
+    if (err.name === 'MulterError') {
+        status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        message = err.code === 'LIMIT_FILE_SIZE' ? 'A file is larger than 10 MB.'
+            : err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT' ? 'Upload at most 5 files at a time.'
+            : err.message;
+    } else if (err.type === 'entity.parse.failed') {
+        message = 'Request body is not valid JSON.';
+    } else if (err.type === 'entity.too.large') {
+        message = 'Request body is too large.';
+    }
+    if (status === 502 || status === 504) status = 503; // see edgeSafe in routes/api.js
+    if (status >= 500) logServer(`Unhandled route error on ${req.method} ${req.originalUrl}: ${err.stack || err.message}`, 'error');
+    res.status(status).json({ error: message, code });
 });
 
 // ── Fatal error handler ──
@@ -173,10 +197,21 @@ async function startServer() {
             logServer('API_PORT not set, using default: 3001', 'warn');
         }
 
-        // Step 2: Initialize database
+        // Step 2: Initialize database. The DB is remote; if it is briefly
+        // unreachable, serve anyway (requests fail individually) and keep
+        // retrying in the background instead of crash-looping under pm2.
         logServer('Step 2: Initializing database connection...');
-        await initTables();
-        logServer('✓ Database initialized successfully');
+        const initWithRetry = async (attempt = 1) => {
+            try {
+                await initTables();
+                logServer('✓ Database initialized successfully');
+            } catch (err) {
+                const delay = Math.min(300000, 15000 * attempt);
+                logServer(`Database init failed (attempt ${attempt}): ${err.message}. Retrying in ${delay / 1000}s`, 'error');
+                setTimeout(() => initWithRetry(attempt + 1), delay).unref();
+            }
+        };
+        await initWithRetry();
         
         // Step 3: Start server
         logServer('Step 3: Starting HTTP server...');
@@ -236,11 +271,12 @@ startServer().catch(err => {
 });
 
 // ── Global error handlers ──
+// A stray rejected promise (e.g. a fire-and-forget DB write) is a bug to
+// log, not a reason to take every user's session down with a restart.
 process.on('unhandledRejection', (reason) => {
     const err = reason instanceof Error ? reason : new Error(String(reason));
     logServer(`Unhandled Rejection: ${err.message}`, 'error');
     logServer(`Stack: ${err.stack}`, 'error');
-    handleFatalError(err, 'Unhandled Promise Rejection');
 });
 
 process.on('uncaughtException', (error) => {

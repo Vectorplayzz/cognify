@@ -120,7 +120,13 @@ async function callLlmProxy(
                         throw new Error(`Please sign in again to use AI features (${response.status}).`);
                     }
 
-                    throw new Error(`AI request failed (${response.status}): ${error}`);
+                    let reason = '';
+                    try { reason = JSON.parse(error)?.error || ''; } catch { /* not JSON */ }
+                    // Never surface an HTML error page (e.g. from a proxy) as a message.
+                    if (!reason && !/<[a-z!]/i.test(error)) reason = error.slice(0, 200);
+                    throw new Error(response.status >= 500
+                        ? `The AI service is unavailable right now. ${reason}`.trim()
+                        : `AI request failed (${response.status}): ${reason}`);
                 }
 
                 if (options.stream) {
@@ -140,11 +146,11 @@ async function callLlmProxy(
                             for (const line of lines) {
                                 if (!line.trim() || !line.startsWith('data: ')) continue;
                                 if (line.includes('[DONE]')) continue;
-                                try {
-                                    const data = JSON.parse(line.slice(6));
-                                    const content = data.choices?.[0]?.delta?.content || '';
-                                    if (content) yield content;
-                                } catch { }
+                                let data: any;
+                                try { data = JSON.parse(line.slice(6)); } catch { continue; }
+                                if (data?.error) throw new Error(data.error.message || 'The AI stream was interrupted.');
+                                const content = data.choices?.[0]?.delta?.content || '';
+                                if (content) yield content;
                             }
                         }
                     };

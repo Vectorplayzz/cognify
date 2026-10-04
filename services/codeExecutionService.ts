@@ -51,7 +51,7 @@ export const LANGUAGES: LanguageConfig[] = [
         extension: '.js',
         icon: 'fa-js',
         iconPrefix: 'fab',
-        defaultCode: '// JavaScript 20.11.1\nconst greet = (name) => {\n  return `Hello, ${name}! 🚀`;\n};\n\ngreet("Developer");\n\n// Array operations\nconst nums = [1, 2, 3, 4, 5];\nconst squares = nums.map(n => n ** 2);\nreturn squares;',
+        defaultCode: '// JavaScript 20.11.1\nconst greet = (name) => {\n  return `Hello, ${name}! 🚀`;\n};\n\nconsole.log(greet("Developer"));\n\n// Array operations\nconst nums = [1, 2, 3, 4, 5];\nconst squares = nums.map(n => n ** 2);\nconsole.log("Squares:", squares);',
         supportsStdin: false,
         runsInBrowser: false,
     },

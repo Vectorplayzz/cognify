@@ -185,10 +185,7 @@ export class NotesService {
             `--- SOURCE: ${s.title} (${s.type}) ---\n${s.content}`
         ).join('\n\n');
 
-        const userPrompt = `
-${RAG_SYSTEM_PROMPT}
-
-SOURCES:
+        const userPrompt = `SOURCES:
 ${combinedContent}
 
 TASK: ${NOTE_TEMPLATES[noteType]}
@@ -250,10 +247,7 @@ Remember: Use ONLY information from the sources above. Do not add external knowl
             `--- SOURCE: ${s.title} (${s.type}) ---\n${s.content}`
         ).join('\n\n');
 
-        const userPrompt = `
-${RAG_SYSTEM_PROMPT}
-
-SOURCES:
+        const userPrompt = `SOURCES:
 ${combinedContent}
 
 TASK: ${NOTE_TEMPLATES[noteType]}

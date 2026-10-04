@@ -14,6 +14,7 @@ import { rateLimit } from '../middleware/rateLimit.js';
 import { requireAuth, assertSelf } from '../middleware/auth.js';
 import { issueSession } from '../auth/session.js';
 import { verifyGoogleAccessToken, GoogleAuthError } from '../auth/google.js';
+import * as gamification from '../services/gamification.js';
 
 const router = Router();
 
@@ -27,11 +28,23 @@ const PUBLIC_ROUTES = new Set([
     'GET /health/piston',
     'GET /llm/status',
     'GET /search/status',
+    'GET /health',
 ]);
 
 router.use((req, res, next) => {
     if (PUBLIC_ROUTES.has(`${req.method} ${req.path}`)) return next();
     return requireAuth(req, res, next);
+});
+
+// ── Health (public, for uptime monitors; nginx only proxies /api) ──
+router.get('/health', async (req, res) => {
+    const started = Date.now();
+    try {
+        await pool.query('SELECT 1');
+        res.json({ status: 'ok', db: 'ok', dbLatencyMs: Date.now() - started, timestamp: new Date().toISOString() });
+    } catch (err) {
+        res.status(503).json({ status: 'degraded', db: 'unreachable', timestamp: new Date().toISOString() });
+    }
 });
 
 // ── Limits ──
@@ -57,6 +70,12 @@ function sanitizeSource(source) {
     }
     if (out.sourceUrl && !/^https:\/\/roadmap\.sh\//.test(out.sourceUrl)) delete out.sourceUrl;
     return Object.keys(out).length ? out : null;
+}
+
+// Cloudflare sits in front of nginx and replaces any 502/504 from the origin
+// with its own HTML error page, hiding our JSON. Report upstream failures as 503.
+function edgeSafe(status) {
+    return status === 502 || status === 504 ? 503 : status;
 }
 
 function clampLimit(value, fallback, max) {
@@ -109,8 +128,8 @@ router.post('/auth/google', authLimiter, async (req, res) => {
                 updated_at = CURRENT_TIMESTAMP`,
             [profile.googleId, profile.name, profile.email, profile.picture]
         );
-        const [rows] = await pool.query('SELECT * FROM users WHERE google_id = ?', [profile.googleId]);
-        const user = rows[0];
+        const [rows] = await pool.query('SELECT id FROM users WHERE google_id = ?', [profile.googleId]);
+        const user = await gamification.getUser(rows[0].id);
         const session = issueSession({ userId: user.id, googleId: user.google_id });
         log('Auth', `Signed in user id=${user.id}`);
         res.json({ user, token: session.token, expiresAt: session.expiresAt });
@@ -126,9 +145,9 @@ router.post('/auth/google', authLimiter, async (req, res) => {
 
 router.get('/auth/me', async (req, res) => {
     try {
-        const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
-        if (rows.length === 0) return res.status(401).json({ error: 'Account no longer exists', code: 'invalid_session' });
-        res.json(rows[0]);
+        const user = await gamification.getUser(req.user.id);
+        if (!user) return res.status(401).json({ error: 'Account no longer exists', code: 'invalid_session' });
+        res.json(user);
     } catch (err) {
         console.error('[API] Get current user error:', err);
         res.status(500).json({ error: 'Internal server error' });
@@ -153,26 +172,34 @@ router.get('/users/:googleId', async (req, res) => {
     }
 });
 
+// XP is computed on the server from completed levels (see PUT /progress);
+// a client-sent xp value is ignored. Only earned badge ids are stored here.
+const KNOWN_REWARDS = new Set(['first-quiz', 'xp-500', 'xp-1000', 'xp-2500', 'xp-5000', 'xp-10000', 'perfect-quiz', 'three-roadmaps']);
+
 router.put('/users/:id/xp', async (req, res) => {
     if (!assertSelf(req, res, req.params.id)) return;
     try {
-        const xp = Number(req.body?.xp);
-        if (!Number.isInteger(xp) || xp < 0 || xp > MAX_XP) {
-            return res.status(400).json({ error: 'xp must be a non-negative integer' });
+        const current = await gamification.getUser(req.user.id);
+        if (!current) return res.status(404).json({ error: 'User not found' });
+        const incoming = Array.isArray(req.body?.rewards) ? req.body.rewards.filter((r) => KNOWN_REWARDS.has(r)) : [];
+        const merged = Array.from(new Set([...(Array.isArray(current.rewards) ? current.rewards : []), ...incoming]));
+        if (merged.length !== (current.rewards || []).length) {
+            await pool.query('UPDATE users SET rewards = ? WHERE id = ?', [JSON.stringify(merged), req.user.id]);
         }
-        const rewards = Array.isArray(req.body?.rewards)
-            ? req.body.rewards.filter((r) => typeof r === 'string').slice(0, 200).map((r) => r.slice(0, 100))
-            : [];
-        log('Users', `Update XP: user=${req.user.id} xp=${xp}`);
-        await pool.query(
-            `UPDATE users SET xp = ?, rewards = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-            [xp, JSON.stringify(rewards), req.user.id]
-        );
-        const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
-        res.json(rows[0]);
+        res.json(await gamification.getUser(req.user.id));
     } catch (err) {
-        console.error('[API] Update XP error:', err);
+        console.error('[API] Update rewards error:', err);
         res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ── Leaderboard ──
+router.get('/leaderboard', async (req, res) => {
+    try {
+        res.json(await gamification.leaderboard(req.user.id, req.query.limit));
+    } catch (err) {
+        console.error('[API] Leaderboard error:', err);
+        res.status(500).json({ error: 'Failed to load the leaderboard' });
     }
 });
 
@@ -327,11 +354,13 @@ router.put('/progress', async (req, res) => {
                 updated_at = CURRENT_TIMESTAMP`,
             [req.user.id, roadmap_id, JSON.stringify(Array.isArray(completed_levels) ? completed_levels : []), JSON.stringify(Array.isArray(quiz_results) ? quiz_results : [])]
         );
+        await gamification.awardCompletedLevels(req.user.id, roadmap_id, completed_levels);
+        await gamification.recordActivity(req.user.id);
         const [rows] = await pool.query(
             'SELECT * FROM user_progress WHERE user_id = ? AND roadmap_id = ?',
             [req.user.id, roadmap_id]
         );
-        res.json(rows[0]);
+        res.json({ ...rows[0], user: await gamification.getUser(req.user.id) });
     } catch (err) {
         console.error('[API] Upsert progress error:', err);
         res.status(500).json({ error: 'Internal server error' });
@@ -472,6 +501,7 @@ router.post('/chat/messages', async (req, res) => {
 
         // Auto-set title from first user message
         if (role === 'user') {
+            gamification.touchActivity(req.user.id);
             await pool.query(
                 `UPDATE chat_sessions SET title = ? WHERE id = ? AND title = 'New Chat'`,
                 [content.substring(0, 80), session_id]
@@ -525,6 +555,7 @@ router.post('/code-history', async (req, res) => {
         }
         if (code.length > MAX_MESSAGE_CHARS) return res.status(413).json({ error: 'Code is too long' });
         log('Code', `Save: user=${req.user.id} lang=${language}`);
+        gamification.touchActivity(req.user.id);
         const [result] = await pool.query(
             `INSERT INTO code_history (user_id, language, code, stdin, output)
              VALUES (?, ?, ?, ?, ?)`,
@@ -684,9 +715,10 @@ router.get('/rooms/:id/messages', async (req, res) => {
         const limit = clampLimit(req.query.limit, 100, 500);
         const after = req.query.after;
         const [rows] = after
-            ? await pool.query('SELECT * FROM room_messages WHERE room_id = ? AND id > ? ORDER BY created_at ASC LIMIT ?', [req.params.id, after, limit])
-            : await pool.query('SELECT * FROM room_messages WHERE room_id = ? ORDER BY created_at ASC LIMIT ?', [req.params.id, limit]);
-        res.json(rows);
+            ? await pool.query('SELECT * FROM room_messages WHERE room_id = ? AND id > ? ORDER BY id ASC LIMIT ?', [req.params.id, after, limit])
+            : await pool.query('SELECT * FROM room_messages WHERE room_id = ? ORDER BY id DESC LIMIT ?', [req.params.id, limit]);
+        // Without ?after, return the most recent page, oldest first.
+        res.json(after ? rows : rows.reverse());
     } catch (err) {
         console.error('[API] Get room messages error:', err);
         res.status(500).json({ error: 'Failed to load messages' });
@@ -696,6 +728,7 @@ router.get('/rooms/:id/messages', async (req, res) => {
 // Members post as themselves; the AI personas they invoke post as 'bot'.
 // 'system' messages are server-generated only.
 const ROOM_ROLES = new Set(['user', 'bot']);
+const ROOM_PERSONAS = ['Socrates', 'Ada', 'Newton', 'Turing'];
 
 router.post('/rooms/:id/messages', async (req, res) => {
     try {
@@ -714,9 +747,11 @@ router.post('/rooms/:id/messages', async (req, res) => {
             senderName = users[0]?.name || 'Unknown';
             authorId = req.user.id;
         } else {
-            senderName = typeof req.body?.sender_name === 'string' && req.body.sender_name.trim()
-                ? req.body.sender_name.trim().slice(0, 60)
-                : 'Assistant';
+            // Bot messages may only speak as one of the known personas, so a
+            // member cannot post as "System" or as another person.
+            const persona = ROOM_PERSONAS.find((p) => p.toLowerCase() === String(req.body?.persona || req.body?.sender_name || '').toLowerCase());
+            senderName = persona || 'Assistant';
+            req.body.persona = persona || null;
             authorId = null;
         }
         log('Rooms', `Message in room=${req.params.id} from user=${req.user.id} role=${role}`);
@@ -724,7 +759,7 @@ router.post('/rooms/:id/messages', async (req, res) => {
         const [result] = await pool.query(
             `INSERT INTO room_messages (room_id, user_id, sender_name, role, content, persona)
              VALUES (?, ?, ?, ?, ?, ?)`,
-            [req.params.id, authorId, senderName, role, content, typeof persona === 'string' ? persona.slice(0, 60) : null]
+            [req.params.id, authorId, senderName, role, content, role === 'bot' ? req.body.persona : null]
         );
         const [rows] = await pool.query('SELECT * FROM room_messages WHERE id = ?', [result.insertId]);
         res.json(rows[0]);
@@ -847,7 +882,7 @@ router.post('/execute', executionLimiter, async (req, res) => {
         res.json(result);
     } catch (err) {
         if (err instanceof codeExecution.ExecutionError) {
-            return res.status(err.status).json({
+            return res.status(edgeSafe(err.status)).json({
                 error: err.message,
                 code: err.code,
                 ...(err.field ? { field: err.field } : {}),
@@ -891,15 +926,15 @@ router.post('/llm/chat', llmLimiter, async (req, res) => {
     } catch (err) {
         if (res.headersSent) return res.end(); // stream already started
         if (err instanceof llmProxy.LlmProxyError) {
-            return res.status(err.status).json({ error: err.message, code: err.code });
+            return res.status(edgeSafe(err.status)).json({ error: err.message, code: err.code });
         }
         console.error('[API] LLM proxy error:', err);
         res.status(500).json({ error: 'AI request failed', code: 'llm_failed' });
     }
 });
 
-router.get('/llm/status', (req, res) => {
-    res.json({ configured: llmProxy.isConfigured(), models: llmProxy.ALLOWED_MODELS });
+router.get('/llm/status', async (req, res) => {
+    res.json({ configured: llmProxy.isConfigured(), models: llmProxy.ALLOWED_MODELS, ...(await llmProxy.probe()) });
 });
 
 // ── Web search proxy: keeps the Exa key server-side ──
@@ -909,15 +944,21 @@ router.post('/search/web', rateLimit({ windowMs: 60000, max: Number(process.env.
         res.json({ results });
     } catch (err) {
         if (err instanceof searchProxy.SearchProxyError) {
-            return res.status(err.status).json({ error: err.message, code: err.code });
+            return res.status(edgeSafe(err.status)).json({ error: err.message, code: err.code });
         }
         console.error('[API] Search proxy error:', err);
         res.status(500).json({ error: 'Search failed', code: 'search_failed' });
     }
 });
 
+// Public, so cache the live probe: otherwise anyone could make the server
+// hammer the upstream search engines.
+let searchStatusCache = { at: 0, body: null };
 router.get('/search/status', async (req, res) => {
-    res.json({ configured: searchProxy.isConfigured(), ...(await searchProxy.health()) });
+    if (!searchStatusCache.body || Date.now() - searchStatusCache.at > 60000) {
+        searchStatusCache = { at: Date.now(), body: { configured: searchProxy.isConfigured(), ...(await searchProxy.health()) } };
+    }
+    res.json(searchStatusCache.body);
 });
 
 // ── Notes Routes ──
