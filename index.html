@@ -1,27 +1,22 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Cognify — Learn anything, faster</title>
-  <meta name="description" content="Cognify builds a personal learning path for any topic, then teaches it with AI lessons, quizzes, a code playground and a tutor that remembers you." />
-  <meta name="theme-color" content="#07070c" />
+  <title>Cognify — the fun, focused way to learn anything</title>
+  <meta name="description" content="Pick any topic and Cognify turns it into a path of short lessons, quizzes and coding practice, with an AI tutor beside you." />
+  <meta name="theme-color" content="#6c56ff" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..800&family=Geist+Mono:wght@400..600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
   <script>
     // Apply the saved theme before first paint so there is no flash.
     try {
       var t = localStorage.getItem('cognify_theme');
-      if (t === 'light' || (!t && window.matchMedia('(prefers-color-scheme: light)').matches)) {
-        document.documentElement.classList.remove('dark');
-      }
+      if (t === 'dark' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches)) document.documentElement.classList.add('dark');
     } catch (e) {}
   </script>
 </head>
 <body>
   <div id="root"></div>
-  <script type="module" src="/index.tsx"></script>
+  <script type="module" src="/src/main.tsx"></script>
 </body>
 </html>

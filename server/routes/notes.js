@@ -198,6 +198,45 @@ router.post('/sources', ragLimiter, async (req, res) => {
     }
 });
 
+// The caller's uploaded sources (newest first), without their full text.
+router.get('/my-sources', async (req, res) => {
+    try {
+        const [rows] = await pool.query(
+            `SELECT id, type, title, CHAR_LENGTH(content) AS length, LEFT(content, 240) AS preview, created_at
+             FROM note_sources WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`,
+            [req.user.id]
+        );
+        res.json(rows);
+    } catch (err) {
+        console.error('[API] List sources error:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+router.get('/sources/:id', async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT * FROM note_sources WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+        if (!rows.length) return res.status(404).json({ error: 'Source not found' });
+        res.json(rows[0]);
+    } catch (err) {
+        console.error('[API] Get source error:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+router.delete('/sources/:id', async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT id FROM note_sources WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+        if (!rows.length) return res.status(404).json({ error: 'Source not found' });
+        await pool.query('DELETE FROM note_embeddings WHERE source_id = ?', [req.params.id]);
+        await pool.query('DELETE FROM note_sources WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+        res.json({ success: true });
+    } catch (err) {
+        console.error('[API] Delete source error:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 router.get('/notes/:noteId/sources', async (req, res) => {
     try {
         if (!(await ownsNote(req.user.id, req.params.noteId))) return res.status(404).json({ error: 'Note not found' });

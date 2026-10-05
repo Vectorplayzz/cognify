@@ -1,0 +1,7 @@
+import{c as e,t as a,B as n}from"./index-DddISmIX.js";import{j as s}from"./motion-DeY0_Mnt.js";import{r as t}from"./react-vendor-DFTrxAzF.js";
+/**
+ * @license lucide-react v1.52.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */const o={name:"arrow-left",size:24,node:[["path",{d:"m12 19-7-7 7-7",key:"1l729n"}],["path",{d:"M19 12H5",key:"x3x0zl"}]]},i=e(o),r={name:"plus",size:24,node:[["path",{d:"M5 12h14",key:"1ays0h"}],["path",{d:"M12 5v14",key:"s699le"}]]},l=e(r),d={name:"trash",size:24,node:[["path",{d:"M10 11v6",key:"nco0om"}],["path",{d:"M14 11v6",key:"outv1u"}],["path",{d:"M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6",key:"miytrc"}],["path",{d:"M3 6h18",key:"d0wm0j"}],["path",{d:"M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",key:"e791ji"}]],aliases:["trash-2"]},c=e(d);function h(){const[e,o]=t.useState(null),i=t.useRef(()=>{}),r=t.useCallback(e=>(o(e),new Promise(e=>{i.current=e})),[]),l=e=>{i.current(e),o(null)};return[s.jsx(a,{open:!!e,onClose:()=>l(!1),title:null==e?void 0:e.title,description:null==e?void 0:e.description,children:s.jsxs("div",{className:"flex justify-end gap-2",children:[s.jsx(n,{variant:"ghost",onClick:()=>l(!1),children:"Cancel"}),s.jsx(n,{variant:(null==e?void 0:e.danger)?"danger":"primary",onClick:()=>l(!0),autoFocus:!0,children:(null==e?void 0:e.confirmLabel)||"Confirm"})]})}),r]}export{i as A,l as P,c as T,h as u};

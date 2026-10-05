@@ -1,8 +1,0 @@
-{
-  "name": "CognifyAi Learning Platform",
-  "description": "A comprehensive AI-powered learning platform featuring interactive roadmaps, a smart code playground, and a gamified learning experience inspired by roadmap.sh.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone"
-  ]
-}

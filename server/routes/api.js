@@ -29,6 +29,7 @@ const PUBLIC_ROUTES = new Set([
     'GET /llm/status',
     'GET /search/status',
     'GET /health',
+    'GET /public/stats',
 ]);
 
 router.use((req, res, next) => {
@@ -193,6 +194,59 @@ router.put('/users/:id/xp', async (req, res) => {
     }
 });
 
+// ── Activity: per-day counts for the heatmap, streak week and daily quests ──
+router.get('/me/activity', async (req, res) => {
+    const days = Math.max(7, Math.min(370, parseInt(req.query.days, 10) || 140));
+    const uid = req.user.id;
+    try {
+        const [rows] = await pool.query(
+            `SELECT d, SUM(levels) AS levels, SUM(xp) AS xp, SUM(chats) AS chats, SUM(runs) AS runs, SUM(notes) AS notes FROM (
+                SELECT DATE(created_at) d, COUNT(*) levels, SUM(xp) xp, 0 chats, 0 runs, 0 notes
+                  FROM xp_ledger WHERE user_id = ? AND topic_key <> '__legacy__' AND created_at >= CURDATE() - INTERVAL ? DAY GROUP BY d
+                UNION ALL
+                SELECT DATE(created_at), 0, 0, COUNT(*), 0, 0
+                  FROM chat_messages WHERE user_id = ? AND role = 'user' AND created_at >= CURDATE() - INTERVAL ? DAY GROUP BY DATE(created_at)
+                UNION ALL
+                SELECT DATE(created_at), 0, 0, 0, COUNT(*), 0
+                  FROM code_history WHERE user_id = ? AND created_at >= CURDATE() - INTERVAL ? DAY GROUP BY DATE(created_at)
+                UNION ALL
+                SELECT DATE(created_at), 0, 0, 0, 0, COUNT(*)
+                  FROM notes WHERE user_id = ? AND created_at >= CURDATE() - INTERVAL ? DAY GROUP BY DATE(created_at)
+             ) t GROUP BY d ORDER BY d`,
+            [uid, days, uid, days, uid, days, uid, days]
+        );
+        const [[{ today }]] = await pool.query('SELECT CURDATE() AS today');
+        const fmt = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10));
+        const list = rows.map((r) => ({
+            date: fmt(r.d),
+            levels: Number(r.levels) || 0, xp: Number(r.xp) || 0,
+            chats: Number(r.chats) || 0, runs: Number(r.runs) || 0, notes: Number(r.notes) || 0,
+        }));
+        const todayKey = fmt(today);
+        const t = list.find((r) => r.date === todayKey) || { date: todayKey, levels: 0, xp: 0, chats: 0, runs: 0, notes: 0 };
+        res.json({ today: t, days: list });
+    } catch (err) {
+        console.error('[API] Activity error:', err);
+        res.status(500).json({ error: 'Failed to load activity' });
+    }
+});
+
+// ── Public stats for the landing page (cached) ──
+let publicStatsCache = { at: 0, body: null };
+router.get('/public/stats', async (req, res) => {
+    try {
+        if (!publicStatsCache.body || Date.now() - publicStatsCache.at > 10 * 60000) {
+            const [[a]] = await pool.query('SELECT COUNT(*) AS learners FROM users');
+            const [[b]] = await pool.query('SELECT COUNT(*) AS roadmaps FROM roadmaps');
+            const [[c]] = await pool.query("SELECT COUNT(*) AS levels FROM xp_ledger WHERE topic_key <> '__legacy__'");
+            publicStatsCache = { at: Date.now(), body: { learners: Number(a.learners), roadmaps: Number(b.roadmaps), levelsCompleted: Number(c.levels) } };
+        }
+        res.json(publicStatsCache.body);
+    } catch (err) {
+        res.status(503).json({ error: 'Stats unavailable' });
+    }
+});
+
 // ── Leaderboard ──
 router.get('/leaderboard', async (req, res) => {
     try {
@@ -345,6 +399,25 @@ router.put('/progress', async (req, res) => {
         if (!(await ownsRoadmap(req.user.id, roadmap_id))) return res.status(404).json({ error: 'Roadmap not found' });
         log('Progress', `Upsert: user=${req.user.id} roadmap=${roadmap_id}`);
 
+        // Merge with what is stored rather than overwrite: a quiz save and a
+        // level completion are sent together and can arrive in either order,
+        // and progress made on another device must not be lost.
+        const [existingRows] = await pool.query(
+            'SELECT completed_levels, quiz_results FROM user_progress WHERE user_id = ? AND roadmap_id = ?',
+            [req.user.id, roadmap_id]
+        );
+        const prev = existingRows[0] || {};
+        const mergedLevels = Array.from(new Set([
+            ...parseJson(prev.completed_levels, []),
+            ...(Array.isArray(completed_levels) ? completed_levels : []),
+        ].filter((x) => typeof x === 'string' && x.length <= 255))).slice(0, 500);
+        const quizByLevel = new Map();
+        for (const q of [...parseJson(prev.quiz_results, []), ...(Array.isArray(quiz_results) ? quiz_results : [])]) {
+            if (!q || typeof q.levelId !== 'string') continue;
+            const cur = quizByLevel.get(q.levelId);
+            // Keep the most recent attempt for each level.
+            if (!cur || String(q.submittedAt || '') >= String(cur.submittedAt || '')) quizByLevel.set(q.levelId, q);
+        }
         await pool.query(
             `INSERT INTO user_progress (user_id, roadmap_id, completed_levels, quiz_results, updated_at)
              VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -352,9 +425,9 @@ router.put('/progress', async (req, res) => {
                 completed_levels = VALUES(completed_levels),
                 quiz_results = VALUES(quiz_results),
                 updated_at = CURRENT_TIMESTAMP`,
-            [req.user.id, roadmap_id, JSON.stringify(Array.isArray(completed_levels) ? completed_levels : []), JSON.stringify(Array.isArray(quiz_results) ? quiz_results : [])]
+            [req.user.id, roadmap_id, JSON.stringify(mergedLevels), JSON.stringify(Array.from(quizByLevel.values()).slice(0, 500))]
         );
-        await gamification.awardCompletedLevels(req.user.id, roadmap_id, completed_levels);
+        await gamification.awardCompletedLevels(req.user.id, roadmap_id, mergedLevels);
         await gamification.recordActivity(req.user.id);
         const [rows] = await pool.query(
             'SELECT * FROM user_progress WHERE user_id = ? AND roadmap_id = ?',

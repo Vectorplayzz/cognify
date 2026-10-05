@@ -292,3 +292,22 @@ omniroute providers add ollama-local --name ollama --no-credential \
 Its keyless free-tier providers were not usable in practice (OpenCode returns
 403 outside its own client; Felo returns 400), so a working backend is required
 rather than optional.
+
+## Frontend (Cognify 2.1)
+
+The React app lives in `src/` (entry `src/main.tsx`, routes in `src/App.tsx`):
+
+| Route | Page | Modelled on |
+|---|---|---|
+| `/` | Landing | Duolingo-style split hero + feature rows |
+| `/learn` | Course path (levels → Lesson / Deep dive / Quiz nodes) + right rail (streak, daily quests, leaderboard) | Duolingo |
+| `/lesson/:courseId/:levelId` | Full-screen lesson player with Check/Continue bar and a contextual tutor drawer; 60% to pass | Brilliant |
+| `/courses` | Course catalog: create any topic, your courses, explore categories | Coursera |
+| `/practice` | Code workspace: languages, run history, AI assistant, console/preview | Replit |
+| `/tutor` | Chat with history, tutor personas, voice input, web search | ChatGPT |
+| `/notes` | Sources · chat with your sources · studio (summary, guide, exam prep, flashcards) | NotebookLM |
+| `/community`, `/community/:roomId`, `/community/leaderboard` | Study rooms with AI personas, leagues | Discord |
+| `/profile` | Stats, activity heatmap, badges, daily goal | GitHub |
+
+Old URLs (`/home`, `/roadmap`, `/playground`, `/chatbot`, `/leaderboard`) redirect.
+Build for production with `npm run build:prod` (Tailwind v4, fonts self-hosted via Fontsource).
