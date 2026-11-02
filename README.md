@@ -311,3 +311,5 @@ The React app lives in `src/` (entry `src/main.tsx`, routes in `src/App.tsx`):
 
 Old URLs (`/home`, `/roadmap`, `/playground`, `/chatbot`, `/leaderboard`) redirect.
 Build for production with `npm run build:prod` (Tailwind v4, fonts self-hosted via Fontsource).
+
+See [docs/PRD.md](docs/PRD.md) for the product requirements document.
