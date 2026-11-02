@@ -1,23 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useGoogleLogin } from '@react-oauth/google';
 import { motion } from 'motion/react';
 import { ArrowRight, BookOpen, Bot, Check, Code2, Crown, Dumbbell, Flame, Lock, Moon, NotebookPen, Play, Star, Sun, Trophy, Users, Zap } from 'lucide-react';
-import { signInWithGoogle, hasSession, clearSession } from '../services/apiService';
-import { saveProfile } from '../lib/session';
+import { hasSession, clearSession } from '../services/apiService';
+import AuthDialog, { AuthMode } from '../shell/AuthDialog';
 import { useTheme } from '../lib/theme';
 import { cn } from '../lib/cn';
 import { Button } from '../ui';
 import Logo, { LogoMark } from '../shell/Logo';
 
-const GoogleIcon = () => (
-    <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
-        <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
-        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
-        <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
-        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
-    </svg>
-);
 
 // ── Visual mocks ──
 const PathMock: React.FC = () => {
@@ -135,34 +126,25 @@ const FEATURES = [
     { kicker: 'Together', title: 'Stay motivated with friends and leagues', body: 'Daily streaks, quests and badges keep momentum. Climb from Bronze to Diamond, or open a study room and summon an AI persona into the conversation.', mock: <LeagueMock />, icon: Users, tint: 'text-violet-500' },
 ];
 
-const Landing: React.FC = () => {
+const Landing: React.FC<{ authMode?: AuthMode }> = ({ authMode }) => {
     const navigate = useNavigate();
     const { theme, toggle } = useTheme();
     const [signedIn, setSignedIn] = useState(false);
-    const [busy, setBusy] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [auth, setAuth] = useState<AuthMode | null>(authMode || null);
 
     useEffect(() => {
-        if (localStorage.getItem('user') && hasSession()) setSignedIn(true);
-        else if (localStorage.getItem('user')) clearSession();
-    }, []);
+        if (localStorage.getItem('user') && hasSession()) {
+            setSignedIn(true);
+            if (authMode) navigate('/learn', { replace: true });
+        } else if (localStorage.getItem('user')) clearSession();
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const login = useGoogleLogin({
-        onSuccess: async (t) => {
-            setBusy(true); setError(null);
-            try {
-                const { user } = await signInWithGoogle(t.access_token);
-                saveProfile({ sub: user.google_id, name: user.name, email: user.email, picture: user.picture });
-                navigate('/learn');
-            } catch (e: any) { setError(e?.message || 'Sign-in failed. Please try again.'); }
-            finally { setBusy(false); }
-        },
-        onError: () => { setError('Google sign-in was cancelled or failed.'); setBusy(false); },
-    });
+    const openAuth = (m: AuthMode) => setAuth(m);
+    const closeAuth = () => { setAuth(null); if (authMode) navigate('/', { replace: true }); };
 
     const CTA = ({ className }: { className?: string }) => signedIn
         ? <Link to="/learn" className={className}><Button variant="primary" size="xl" uppercase className="w-full">Continue learning <ArrowRight className="size-5" /></Button></Link>
-        : <Button variant="primary" size="xl" uppercase loading={busy} onClick={() => login()} className={cn('w-full', className)}>Get started — it’s free</Button>;
+        : <Button variant="primary" size="xl" uppercase onClick={() => openAuth('signup')} className={cn('w-full', className)}>Get started — it’s free</Button>;
 
     return (
         <div className="min-h-dvh bg-bg">
@@ -172,7 +154,7 @@ const Landing: React.FC = () => {
                     <div className="flex items-center gap-2">
                         <button onClick={toggle} className="flex size-10 items-center justify-center rounded-xl text-subtle hover:bg-sunken" title="Theme">{theme === 'dark' ? <Sun className="size-5" /> : <Moon className="size-5" />}</button>
                         {signedIn ? <Link to="/learn"><Button variant="primary" size="sm" uppercase>Open app</Button></Link>
-                            : <Button size="sm" uppercase onClick={() => login()} icon={<GoogleIcon />}>Sign in</Button>}
+                            : <Button size="sm" uppercase onClick={() => openAuth('login')}>Sign in</Button>}
                     </div>
                 </div>
             </header>
@@ -190,8 +172,7 @@ const Landing: React.FC = () => {
                         </motion.p>
                         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.6 }} className="mx-auto mt-8 flex max-w-sm flex-col gap-3 lg:mx-0">
                             <CTA />
-                            {!signedIn && <Button size="xl" uppercase onClick={() => login()} icon={<GoogleIcon />} className="w-full">I already have an account</Button>}
-                            {error && <p role="alert" className="text-sm font-semibold text-red-500">{error}</p>}
+                            {!signedIn && <Button size="xl" uppercase onClick={() => openAuth('login')} className="w-full">I already have an account</Button>}
                         </motion.div>
                         <div className="mt-8 flex flex-wrap justify-center gap-x-5 gap-y-2 text-sm font-bold text-subtle lg:justify-start">
                             <span className="flex items-center gap-1.5"><Flame className="size-4 text-orange-500" fill="currentColor" /> Daily streaks</span>
@@ -224,7 +205,7 @@ const Landing: React.FC = () => {
                 <p className="mx-auto mt-4 max-w-md text-lg text-white/80">Your first course is one sign-in away.</p>
                 <div className="mx-auto mt-8 max-w-xs">
                     {signedIn ? <Link to="/learn"><Button size="xl" uppercase className="w-full bg-white text-brand-600 shadow-[0_4px_0_0_rgb(0_0_0/0.25)] active:translate-y-[4px] active:shadow-none">Continue learning</Button></Link>
-                        : <Button size="xl" uppercase loading={busy} onClick={() => login()} className="w-full bg-white text-brand-600 shadow-[0_4px_0_0_rgb(0_0_0/0.25)] active:translate-y-[4px] active:shadow-none">Get started</Button>}
+                        : <Button size="xl" uppercase onClick={() => openAuth('signup')} className="w-full bg-white text-brand-600 shadow-[0_4px_0_0_rgb(0_0_0/0.25)] active:translate-y-[4px] active:shadow-none">Get started</Button>}
                 </div>
             </section>
 
@@ -234,6 +215,7 @@ const Landing: React.FC = () => {
                     <span>© {new Date().getFullYear()} Cognify · Learn something every day</span>
                 </div>
             </footer>
+            <AuthDialog open={!!auth} mode={auth || 'login'} onClose={closeAuth} onModeChange={setAuth} />
         </div>
     );
 };

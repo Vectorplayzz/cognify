@@ -51,8 +51,13 @@ export async function getUser(userId) {
         [userId]
     );
     if (!rows.length) return null;
-    const { streak_alive, ...user } = rows[0];
-    return { ...user, streak: Number(streak_alive) ? user.streak : 0, rewards: parseJson(user.rewards, []) };
+    const { streak_alive, password_hash, password_updated_at, ...user } = rows[0];
+    return {
+        ...user,
+        has_password: Boolean(password_hash),
+        streak: Number(streak_alive) ? user.streak : 0,
+        rewards: parseJson(user.rewards, []),
+    };
 }
 
 /**

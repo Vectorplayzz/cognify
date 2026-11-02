@@ -14,6 +14,7 @@ import { rateLimit } from '../middleware/rateLimit.js';
 import { requireAuth, assertSelf } from '../middleware/auth.js';
 import { issueSession } from '../auth/session.js';
 import { verifyGoogleAccessToken, GoogleAuthError } from '../auth/google.js';
+import * as passwordAuth from '../auth/password.js';
 import * as gamification from '../services/gamification.js';
 
 const router = Router();
@@ -23,6 +24,8 @@ const router = Router();
 // read-only status endpoints that expose nothing user-specific.
 const PUBLIC_ROUTES = new Set([
     'POST /auth/google',
+    'POST /auth/register',
+    'POST /auth/login',
     'GET /roadmaps/catalog',
     'GET /execute/languages',
     'GET /health/piston',
@@ -119,19 +122,30 @@ const authLimiter = rateLimit({ windowMs: 60000, max: Number(process.env.AUTH_RA
 router.post('/auth/google', authLimiter, async (req, res) => {
     try {
         const profile = await verifyGoogleAccessToken(req.body?.access_token);
-        await pool.query(
-            `INSERT INTO users (google_id, name, email, picture)
-             VALUES (?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE
-                name = VALUES(name),
-                email = VALUES(email),
-                picture = VALUES(picture),
-                updated_at = CURRENT_TIMESTAMP`,
-            [profile.googleId, profile.name, profile.email, profile.picture]
-        );
-        const [rows] = await pool.query('SELECT id FROM users WHERE google_id = ?', [profile.googleId]);
+        const email = profile.email ? String(profile.email).trim().toLowerCase() : null;
+        let userId;
+        const [byGoogle] = await pool.query('SELECT id FROM users WHERE google_id = ?', [profile.googleId]);
+        if (byGoogle.length) {
+            userId = byGoogle[0].id;
+            await pool.query('UPDATE users SET name = ?, picture = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [profile.name, profile.picture, userId]);
+        } else {
+            // A password account with the same address: Google has verified
+            // the email belongs to this person, so link instead of duplicating.
+            const [byEmail] = email ? await pool.query('SELECT id, google_id FROM users WHERE email = ?', [email]) : [[]];
+            if (byEmail.length && !byEmail[0].google_id && profile.emailVerified) {
+                userId = byEmail[0].id;
+                await pool.query('UPDATE users SET google_id = ?, picture = COALESCE(picture, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?', [profile.googleId, profile.picture, userId]);
+                log('Auth', `Linked Google to existing account id=${userId}`);
+            } else if (byEmail.length) {
+                return res.status(409).json({ error: 'An account with this email already exists. Sign in with your password instead.', code: 'email_in_use' });
+            } else {
+                const [r] = await pool.query('INSERT INTO users (google_id, name, email, picture) VALUES (?, ?, ?, ?)', [profile.googleId, profile.name, email, profile.picture]);
+                userId = r.insertId;
+            }
+        }
+        const rows = [{ id: userId }];
         const user = await gamification.getUser(rows[0].id);
-        const session = issueSession({ userId: user.id, googleId: user.google_id });
+        const session = issueSession({ userId: user.id, googleId: user.google_id || '' });
         log('Auth', `Signed in user id=${user.id}`);
         res.json({ user, token: session.token, expiresAt: session.expiresAt });
     } catch (err) {
@@ -155,6 +169,97 @@ router.get('/auth/me', async (req, res) => {
     }
 });
 
+// ── Email + password ──
+function sendPasswordAuthError(res, err, fallback) {
+    if (err instanceof passwordAuth.PasswordAuthError) return res.status(err.status).json({ error: err.message, code: err.code });
+    console.error(`[API] ${fallback}:`, err);
+    return res.status(500).json({ error: fallback });
+}
+
+router.post('/auth/register', authLimiter, async (req, res) => {
+    try {
+        const name = passwordAuth.validateName(req.body?.name);
+        const email = passwordAuth.normalizeEmail(req.body?.email);
+        const password = passwordAuth.validatePassword(req.body?.password);
+        const [existing] = await pool.query('SELECT id, google_id FROM users WHERE email = ?', [email]);
+        if (existing.length) {
+            return res.status(409).json({
+                error: existing[0].google_id
+                    ? 'This email is already registered with Google. Use “Continue with Google”, then add a password from your profile.'
+                    : 'An account with this email already exists. Try signing in.',
+                code: 'email_in_use',
+            });
+        }
+        const hash = await passwordAuth.hashPassword(password);
+        let insertId;
+        try {
+            const [r] = await pool.query(
+                'INSERT INTO users (google_id, name, email, password_hash, password_updated_at) VALUES (NULL, ?, ?, ?, CURRENT_TIMESTAMP)',
+                [name, email, hash]
+            );
+            insertId = r.insertId;
+        } catch (err) {
+            if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'An account with this email already exists. Try signing in.', code: 'email_in_use' });
+            throw err;
+        }
+        const user = await gamification.getUser(insertId);
+        const session = issueSession({ userId: user.id, googleId: '' });
+        log('Auth', `Registered user id=${user.id} (password)`);
+        res.status(201).json({ user, token: session.token, expiresAt: session.expiresAt });
+    } catch (err) {
+        sendPasswordAuthError(res, err, 'Sign-up failed');
+    }
+});
+
+router.post('/auth/login', authLimiter, async (req, res) => {
+    let email;
+    try {
+        email = passwordAuth.normalizeEmail(req.body?.email);
+        const password = typeof req.body?.password === 'string' ? req.body.password : '';
+        passwordAuth.checkLoginThrottle(email);
+        const [rows] = await pool.query('SELECT id, google_id, password_hash FROM users WHERE email = ?', [email]);
+        const row = rows[0];
+        if (!row || !row.password_hash) {
+            await passwordAuth.burnTime(password);
+            passwordAuth.recordLoginFailure(email);
+            if (row && row.google_id) {
+                return res.status(401).json({ error: 'This account signs in with Google. Use “Continue with Google”, then you can add a password from your profile.', code: 'use_google' });
+            }
+            return res.status(401).json({ error: 'Incorrect email or password.', code: 'invalid_credentials' });
+        }
+        if (!(await passwordAuth.verifyPassword(password, row.password_hash))) {
+            passwordAuth.recordLoginFailure(email);
+            return res.status(401).json({ error: 'Incorrect email or password.', code: 'invalid_credentials' });
+        }
+        passwordAuth.clearLoginFailures(email);
+        const user = await gamification.getUser(row.id);
+        const session = issueSession({ userId: user.id, googleId: user.google_id || '' });
+        log('Auth', `Signed in user id=${user.id} (password)`);
+        res.json({ user, token: session.token, expiresAt: session.expiresAt });
+    } catch (err) {
+        sendPasswordAuthError(res, err, 'Sign-in failed');
+    }
+});
+
+// Set or change the password of the signed-in account. Accounts that have
+// one must confirm the current password; Google-only accounts can add one.
+router.post('/auth/password', authLimiter, async (req, res) => {
+    try {
+        const next = passwordAuth.validatePassword(req.body?.newPassword);
+        const [rows] = await pool.query('SELECT password_hash, email FROM users WHERE id = ?', [req.user.id]);
+        if (!rows.length) return res.status(401).json({ error: 'Account no longer exists', code: 'invalid_session' });
+        if (!rows[0].email) return res.status(400).json({ error: 'Your account has no email address, so a password can’t be used to sign in.', code: 'no_email' });
+        if (rows[0].password_hash && !(await passwordAuth.verifyPassword(String(req.body?.currentPassword || ''), rows[0].password_hash))) {
+            return res.status(403).json({ error: 'Your current password is incorrect.', code: 'wrong_password' });
+        }
+        await pool.query('UPDATE users SET password_hash = ?, password_updated_at = CURRENT_TIMESTAMP WHERE id = ?', [await passwordAuth.hashPassword(next), req.user.id]);
+        log('Auth', `Password ${rows[0].password_hash ? 'changed' : 'set'} for user id=${req.user.id}`);
+        res.json({ success: true, user: await gamification.getUser(req.user.id) });
+    } catch (err) {
+        sendPasswordAuthError(res, err, 'Could not update the password');
+    }
+});
+
 // ══════════════════════════════════════════
 //  USERS
 // ══════════════════════════════════════════
@@ -164,9 +269,9 @@ router.get('/users/:googleId', async (req, res) => {
         return res.status(403).json({ error: 'You do not have access to this resource', code: 'forbidden' });
     }
     try {
-        const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
-        if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
-        res.json(rows[0]);
+        const user = await gamification.getUser(req.user.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        res.json(user);
     } catch (err) {
         console.error('[API] Get user error:', err);
         res.status(500).json({ error: 'Internal server error' });

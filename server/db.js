@@ -642,6 +642,30 @@ export async function initTables() {
             await backfillLedger(connection);
             logDb('✓ Created and backfilled xp_ledger');
         }
+        // Email + password accounts: google_id becomes optional, emails unique.
+        await addColumn('users', 'password_hash', 'password_hash VARCHAR(255) NULL');
+        await addColumn('users', 'password_updated_at', 'password_updated_at TIMESTAMP NULL');
+        const gidCol = await executeQuery(connection, `
+            SELECT IS_NULLABLE AS n FROM information_schema.COLUMNS
+            WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'google_id'
+        `, 'Check users.google_id nullability');
+        if (gidCol[0] && gidCol[0].n === 'NO') {
+            await executeQuery(connection, 'ALTER TABLE users MODIFY google_id VARCHAR(255) NULL', 'Make users.google_id optional');
+            logDb('✓ users.google_id is now optional');
+        }
+        const emailIdx = await executeQuery(connection, `
+            SELECT COUNT(*) AS count FROM information_schema.STATISTICS
+            WHERE table_schema = DATABASE() AND table_name = 'users' AND index_name = 'uniq_users_email'
+        `, 'Check users email index');
+        if (emailIdx[0].count === 0) {
+            try {
+                await executeQuery(connection, 'ALTER TABLE users ADD UNIQUE KEY uniq_users_email (email)', 'Unique users.email');
+                logDb('✓ users.email is unique');
+            } catch (err) {
+                logDb(`Could not make users.email unique (duplicate emails?): ${err.message}`, 'warn');
+            }
+        }
+
         // TEXT caps at 64 KB and this server is not in strict mode, so long
         // messages, outputs and lessons were silently truncated.
         const widen = [

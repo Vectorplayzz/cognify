@@ -43,7 +43,7 @@ function useAccountSync(enabled: boolean) {
 const RequireAuth: React.FC<{ shell?: boolean }> = ({ shell = true }) => {
     const signedIn = hasSession();
     useAccountSync(signedIn);
-    if (!signedIn) return <Navigate to="/" replace />;
+    if (!signedIn) return <Navigate to="/login" replace />;
     const page = <Suspense fallback={<Loading />}><Outlet /></Suspense>;
     return shell ? <AppShell>{page}</AppShell> : page;
 };
@@ -62,6 +62,8 @@ const App: React.FC = () => (
     <BrowserRouter>
         <Routes>
             <Route path="/" element={<Landing />} />
+            <Route path="/login" element={<Landing authMode="login" key="login" />} />
+            <Route path="/signup" element={<Landing authMode="signup" key="signup" />} />
             <Route element={<RequireAuth shell={false} />}>
                 <Route path="/lesson/:courseId/:levelId" element={<Lesson />} />
             </Route>

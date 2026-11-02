@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarDays, Flame, LogOut, Moon, Sun, Target, Trophy, Zap } from 'lucide-react';
+import { CalendarDays, Check, Flame, KeyRound, LogOut, Moon, Sun, Target, Trophy, Zap } from 'lucide-react';
+import { toast } from 'sonner';
 import * as api from '../services/apiService';
 import { useProgress } from '../services/progressService';
 import { useRoadmaps } from '../services/roadmapStore';
@@ -8,7 +9,7 @@ import { useActivity, useDailyGoal, setDailyGoal, GOAL_OPTIONS } from '../lib/ac
 import { useProfile } from '../lib/session';
 import { useTheme } from '../lib/theme';
 import { cn } from '../lib/cn';
-import { Avatar, Card, ProgressBar, SectionTitle } from '../ui';
+import { Avatar, Button, Card, ProgressBar, SectionTitle } from '../ui';
 import { BadgesWidget } from '../widgets';
 import { useSignOut } from '../shell/nav';
 
@@ -54,6 +55,60 @@ const Heatmap: React.FC<{ days: api.DayActivity[] }> = ({ days }) => {
     );
 };
 
+/** Set a password (Google-only accounts) or change it. */
+const PasswordCard: React.FC<{ account: { email?: string; has_password?: boolean; google_id?: string | null }; onChanged: (u: any) => void }> = ({ account, onChanged }) => {
+    const [open, setOpen] = useState(false);
+    const [current, setCurrent] = useState('');
+    const [next, setNext] = useState('');
+    const [confirm, setConfirm] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const has = !!account.has_password;
+
+    const submit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError(null);
+        if (next.length < 8) return setError('Use at least 8 characters.');
+        if (next !== confirm) return setError('The new passwords don’t match.');
+        setBusy(true);
+        try {
+            const res = await api.changePassword(current, next);
+            onChanged(res.user);
+            setOpen(false); setCurrent(''); setNext(''); setConfirm('');
+            toast.success(has ? 'Password changed' : 'Password added', { description: has ? undefined : `You can now also sign in with ${account.email}.` });
+        } catch (err: any) {
+            setError(err?.message || 'Could not update the password.');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <Card className="p-5">
+            <div className="flex items-center gap-2 font-bold"><KeyRound className="size-4 text-brand-500" /> Sign-in</div>
+            <div className="mt-3 space-y-1.5 text-sm">
+                <div className="flex items-center gap-2 text-muted">{account.google_id ? <Check className="size-4 text-emerald-500" /> : <span className="size-4" />}Google {account.google_id ? 'connected' : 'not connected'}</div>
+                <div className="flex items-center gap-2 text-muted">{has ? <Check className="size-4 text-emerald-500" /> : <span className="size-4" />}Password {has ? 'set' : 'not set'}</div>
+            </div>
+            {!open ? (
+                <Button size="sm" className="mt-4 w-full" onClick={() => setOpen(true)} disabled={!account.email}>{has ? 'Change password' : 'Add a password'}</Button>
+            ) : (
+                <form onSubmit={submit} className="mt-4 space-y-2">
+                    {has && <input type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} placeholder="Current password" className="input" />}
+                    <input type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} placeholder="New password (8+ characters)" className="input" />
+                    <input type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Confirm new password" className="input" />
+                    {error && <p className="text-xs font-semibold text-red-500">{error}</p>}
+                    <div className="flex gap-2 pt-1">
+                        <Button type="button" size="sm" variant="ghost" className="flex-1" onClick={() => { setOpen(false); setError(null); }}>Cancel</Button>
+                        <Button type="submit" size="sm" variant="primary" className="flex-1" loading={busy}>Save</Button>
+                    </div>
+                    {!has && <p className="text-xs text-subtle">Lets you sign in with {account.email} and this password, as well as Google.</p>}
+                </form>
+            )}
+        </Card>
+    );
+};
+
 const Profile: React.FC = () => {
     const profile = useProfile();
     const { xp, level, rank, streak, levelProgress, xpToNext, progress } = useProgress();
@@ -63,9 +118,10 @@ const Profile: React.FC = () => {
     const { theme, toggle } = useTheme();
     const signOut = useSignOut();
     const [joined, setJoined] = useState<string | null>(null);
+    const [account, setAccount] = useState<{ email?: string; has_password?: boolean; google_id?: string | null } | null>(null);
     const [board, setBoard] = useState<api.LeaderboardResponse | null>(null);
     useEffect(() => {
-        api.getCurrentUser().then((u) => setJoined(u.created_at)).catch(() => {});
+        api.getCurrentUser().then((u) => { setJoined(u.created_at); setAccount(u); }).catch(() => {});
         api.getLeaderboard(1).then(setBoard).catch(() => {});
     }, []);
 
@@ -169,6 +225,7 @@ const Profile: React.FC = () => {
                             ))}
                         </div>
                     </Card>
+                    {account && <PasswordCard account={account} onChanged={(u) => setAccount(u)} />}
                     <Card className="p-2">
                         <button onClick={toggle} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-bold text-muted hover:bg-sunken">{theme === 'dark' ? <Sun className="size-4" /> : <Moon className="size-4" />} {theme === 'dark' ? 'Light' : 'Dark'} mode</button>
                         <button onClick={signOut} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-bold text-red-500 hover:bg-red-500/10"><LogOut className="size-4" /> Sign out</button>

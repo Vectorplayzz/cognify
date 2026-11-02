@@ -72,6 +72,7 @@ export async function verifyGoogleAccessToken(accessToken) {
     return {
         googleId: String(profile.body.sub),
         email: profile.body.email || null,
+        emailVerified: profile.body.email_verified === true || profile.body.email_verified === 'true',
         name: profile.body.name || profile.body.email || 'User',
         picture: profile.body.picture || null,
     };

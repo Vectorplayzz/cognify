@@ -59,8 +59,8 @@ export function authHeaders(extra: Record<string, string> = {}): Record<string, 
 export function handleUnauthorized(res: Response) {
     if (res.status !== 401) return;
     clearSession();
-    if (typeof window !== 'undefined' && window.location.pathname !== '/') {
-        window.location.assign('/');
+    if (typeof window !== 'undefined' && !['/', '/login', '/signup'].includes(window.location.pathname)) {
+        window.location.assign('/login');
     }
 }
 
@@ -81,6 +81,44 @@ export async function signInWithGoogle(accessToken: string): Promise<{ user: any
     return body;
 }
 
+/** Store a freshly issued Cognify session. */
+function storeSession(body: { token: string; expiresAt: string; user: any }) {
+    localStorage.setItem(SESSION_KEY, body.token);
+    localStorage.setItem(SESSION_EXPIRES_KEY, body.expiresAt);
+    localStorage.setItem('db_user_id', String(body.user.id));
+}
+
+async function postAuth(path: string, payload: Record<string, unknown>) {
+    const res = await fetch(`${API_BASE}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok || !body?.token) {
+        const err: any = new Error(body?.error || `Request failed (HTTP ${res.status})`);
+        err.code = body?.code;
+        throw err;
+    }
+    storeSession(body);
+    return body as { user: any; token: string; expiresAt: string };
+}
+
+/** Create an email + password account and sign in. */
+export function registerWithPassword(name: string, email: string, password: string) {
+    return postAuth('/auth/register', { name, email, password });
+}
+
+/** Sign in with email + password. */
+export function signInWithPassword(email: string, password: string) {
+    return postAuth('/auth/login', { email, password });
+}
+
+/** Set (Google-only accounts) or change the account password. */
+export async function changePassword(currentPassword: string, newPassword: string) {
+    return apiFetch<{ success: boolean; user: any }>('/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) });
+}
+
 async function apiFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
     // Defensive: catch missing IDs early
     if (/\/(undefined|null|NaN)(\/|\?|$)/.test(path)) {
@@ -96,7 +134,13 @@ async function apiFetch<T = any>(path: string, options: RequestInit = {}): Promi
         handleUnauthorized(res);
         const body = await res.text();
         console.error(`[API] ${res.status} on ${path}:`, body);
-        throw new Error(`API ${res.status}: ${body}`);
+        let message = '';
+        let code: string | undefined;
+        try { const j = JSON.parse(body); message = j?.error || ''; code = j?.code; } catch { /* not JSON */ }
+        const err: any = new Error(message || (res.status >= 500 ? 'Something went wrong on our side. Please try again.' : `Request failed (HTTP ${res.status})`));
+        err.status = res.status;
+        err.code = code;
+        throw err;
     }
     return res.json();
 }
