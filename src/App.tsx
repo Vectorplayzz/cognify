@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, useEffect } from 'react';
 import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import Landing from './pages/Landing';
+import NotFound from './pages/NotFound';
 import AppShell from './shell/AppShell';
 import { Spinner } from './ui';
 import { getCurrentUser, hasSession } from './services/apiService';
@@ -79,8 +80,8 @@ const App: React.FC = () => (
                 <Route path="/playground" element={<Navigate to="/practice" replace />} />
                 <Route path="/chatbot" element={<LegacyChat />} />
                 <Route path="/leaderboard" element={<Navigate to="/community/leaderboard" replace />} />
-                <Route path="*" element={<Navigate to="/learn" replace />} />
             </Route>
+            <Route path="*" element={<NotFound />} />
         </Routes>
     </BrowserRouter>
 );

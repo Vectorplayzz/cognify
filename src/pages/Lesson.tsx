@@ -16,6 +16,7 @@ import { cn } from '../lib/cn';
 import { Button, Drawer, Spinner } from '../ui';
 import Markdown from '../ui/Markdown';
 import { LogoMark } from '../shell/Logo';
+import AiNotice from '../shell/AiNotice';
 
 /** Share of quiz answers needed to complete a level. */
 const PASS_RATIO = 0.6;
@@ -23,6 +24,7 @@ const PASS_RATIO = 0.6;
 type Step =
     | { type: 'read'; key: string; title: string; subIdx: number }
     | { type: 'question'; key: string; qIdx: number }
+    | { type: 'quiz-missing'; key: 'quiz-missing' }
     | { type: 'done'; key: 'done' };
 
 const ReadingSkeleton: React.FC<{ label: string }> = ({ label }) => (
@@ -119,9 +121,12 @@ const Lesson: React.FC = () => {
         const s: Step[] = [{ type: 'read', key: 'overview', title: 'Overview', subIdx: -1 }];
         subtopics.slice(0, 6).forEach((sub, i) => s.push({ type: 'read', key: sub.id, title: sub.title, subIdx: i }));
         quiz.forEach((_, i) => s.push({ type: 'question', key: `q${i}`, qIdx: i }));
-        s.push({ type: 'done', key: 'done' });
+        // A level is only completed by passing its quiz: if it couldn't be
+        // written, stop here with a retry instead of finishing without one.
+        if (!loading.quiz && quiz.length === 0) s.push({ type: 'quiz-missing', key: 'quiz-missing' });
+        else s.push({ type: 'done', key: 'done' });
         return s;
-    }, [subtopics, quiz]);
+    }, [subtopics, quiz, loading.quiz]);
 
     const [idx, setIdx] = useState(0);
     const [target, setTarget] = useState<string | null>(params.get('at'));
@@ -227,7 +232,10 @@ const Lesson: React.FC = () => {
         );
     }
 
-    const readText = step?.type === 'read' ? (step.subIdx < 0 ? overview : content.textFor(subtopics[step.subIdx])) : '';
+    const rawRead = step?.type === 'read' ? (step.subIdx < 0 ? overview : content.textFor(subtopics[step.subIdx])) : '';
+    // The page already shows the title; drop a first heading that repeats it.
+    const shownTitle = step?.type === 'read' ? (step.subIdx < 0 ? level?.title : step.title) : '';
+    const readText = rawRead.replace(/^\s*#{1,3}\s+(.+)\n+/, (m, t) => (t.trim().toLowerCase() === String(shownTitle || '').trim().toLowerCase() ? '' : m));
     const readErr = step?.type === 'read' ? (step.subIdx < 0 ? errors.overview : errors[subtopics[step.subIdx]?.id]) : undefined;
     const readStreaming = step?.type === 'read' && streaming === (step.subIdx < 0 ? 'overview' : subtopics[step.subIdx]?.id);
     const q = step?.type === 'question' ? quiz[step.qIdx] : null;
@@ -254,6 +262,7 @@ const Lesson: React.FC = () => {
                     </div>
                 </header>
 
+                <AiNotice />
                 {/* body */}
                 <div className="mx-auto w-full max-w-2xl flex-1 px-5 pb-48 pt-6">
                     <AnimatePresence mode="wait">
@@ -314,6 +323,14 @@ const Lesson: React.FC = () => {
                                 )
                             )}
 
+                            {step?.type === 'quiz-missing' && (
+                                <div className="flex flex-col items-center pt-10 text-center">
+                                    <div className="flex size-24 items-center justify-center rounded-[28px] bg-sky-500 text-white shadow-[0_7px_0_0_#0369a1]"><Target className="size-12" /></div>
+                                    <h1 className="mt-8 text-3xl font-extrabold">The quiz isn’t ready</h1>
+                                    <p className="mt-2 max-w-md text-muted">We couldn’t write this level’s quiz just now. Try again in a moment — you’ll need to pass it to complete the level.</p>
+                                    <Button variant="primary" size="lg" uppercase className="mt-6" icon={<RefreshCw className="size-4" />} loading={loading.quiz} onClick={() => content.reload()}>Generate quiz</Button>
+                                </div>
+                            )}
                             {step?.type === 'done' && (
                                 <div className="flex flex-col items-center pt-6 text-center">
                                     <motion.div initial={{ scale: 0.4, rotate: -20 }} animate={{ scale: 1, rotate: 0 }} transition={{ type: 'spring', bounce: 0.55 }}
@@ -378,6 +395,8 @@ const Lesson: React.FC = () => {
                         )}
                         {step?.type === 'question' && !isChecked ? (
                             <Button variant="success" size="lg" uppercase className="sm:min-w-44" disabled={selected == null || !q} onClick={check}>Check</Button>
+                        ) : step?.type === 'quiz-missing' ? (
+                            <Button variant="primary" size="lg" uppercase className="sm:min-w-44" onClick={() => navigate('/learn')}>Back to path</Button>
                         ) : step?.type === 'done' ? (
                             <Button variant="primary" size="lg" uppercase className="sm:min-w-44" onClick={() => navigate('/learn')}>Continue</Button>
                         ) : (

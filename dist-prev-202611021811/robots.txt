@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /$
+Disallow: /api/
+Disallow: /learn
+Disallow: /lesson/
+Disallow: /courses
+Disallow: /practice
+Disallow: /tutor
+Disallow: /notes
+Disallow: /community
+Disallow: /profile
+
+Sitemap: https://cognify.ourspaces.net/sitemap.xml

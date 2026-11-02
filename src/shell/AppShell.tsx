@@ -10,6 +10,7 @@ import { Avatar, Drawer, Kbd } from '../ui';
 import { StreakWidget, LevelWidget, QuestsWidget } from '../widgets';
 import Logo from './Logo';
 import CommandPalette from './CommandPalette';
+import AiNotice from './AiNotice';
 import { NAV, useSignOut } from './nav';
 
 /** Small popover anchored under a top-bar pill. */
@@ -136,6 +137,7 @@ const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
                     </div>
                 </div>
             </header>
+            <AiNotice />
 
             <main className={cn('relative', fullBleed ? 'h-[calc(100dvh-66px)] flex-none overflow-hidden max-lg:h-[calc(100dvh-66px-66px)]' : 'flex-1 pb-24 lg:pb-12')}>
                 {children}

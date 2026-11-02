@@ -2,6 +2,9 @@ import React, { memo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import { Check, Copy } from 'lucide-react';
 import { cn } from '../lib/cn';
 
@@ -42,6 +45,18 @@ const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
     );
 };
 
+/**
+ * Models write math as \\( … \\) / \\[ … \\] as often as $ … $; remark-math
+ * only understands dollars, and plain markdown would eat the backslashes.
+ * Convert them, leaving code spans and blocks untouched.
+ */
+function normalizeMath(src: string): string {
+    const parts = src.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g);
+    return parts.map((part, i) => (i % 2 === 1 ? part : part
+        .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `\n$$\n${m.trim()}\n$$\n`)
+        .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m.trim()}$`))).join('');
+}
+
 const components = {
     pre: CodeBlock as any,
     a: ({ node, ...props }: any) => <a {...props} target="_blank" rel="noopener noreferrer" />,
@@ -52,8 +67,8 @@ const components = {
     ),
 };
 
-const remarkPlugins = [remarkGfm];
-const rehypePlugins: any[] = [[rehypeHighlight, { detect: true, ignoreMissing: true }]];
+const remarkPlugins = [remarkGfm, remarkMath];
+const rehypePlugins: any[] = [[rehypeKatex, { throwOnError: false, strict: 'ignore' }], [rehypeHighlight, { detect: true, ignoreMissing: true }]];
 
 /**
  * Renders model output as markdown. Raw HTML in the source is never
@@ -66,7 +81,7 @@ export const Markdown = memo(function Markdown({
     return (
         <div className={cn('prose-cognify', streaming && 'streaming', className)}>
             <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components}>
-                {children || ''}
+                {normalizeMath(children || '')}
             </ReactMarkdown>
         </div>
     );

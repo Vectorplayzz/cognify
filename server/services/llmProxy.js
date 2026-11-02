@@ -53,6 +53,17 @@ function endpoints() {
 // does not have this model. Other 4xx are the request's fault and would fail again.
 const isRetryableStatus = (status) => status >= 500 || status === 404 || status === 429;
 
+/**
+ * Per-model request tweaks. Reasoning models (gpt-oss, qwen3) otherwise
+ * spend the token budget thinking and can return an empty answer; Groq
+ * accepts these knobs on its OpenAI-compatible API.
+ */
+function modelParams(model) {
+    if (/^openai\/gpt-oss/.test(model)) return { reasoning_effort: 'low' };
+    if (/^qwen\/qwen3/.test(model)) return { reasoning_effort: 'none' };
+    return {};
+}
+
 /** Validate the client's request before spending an upstream call. */
 export function validateChatRequest(body) {
     if (!body || typeof body !== 'object') {
@@ -139,7 +150,7 @@ export async function proxyChat(payload, res) {
                     upstream = await fetch(`${baseUrl}/chat/completions`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', ...authHeaders(baseUrl), 'X-Title': 'Cognify' },
-                        body: JSON.stringify({ ...payload, model }),
+                        body: JSON.stringify({ ...payload, ...modelParams(model), model }),
                         signal: controller.signal,
                     });
                 } catch (err) {
@@ -178,6 +189,7 @@ export async function proxyChat(payload, res) {
                         Connection: 'keep-alive',
                         'X-Accel-Buffering': 'no', // tell nginx not to buffer the stream
                     });
+                    recordOutcome(true);
                     // The overall deadline covers getting a first response; once
                     // tokens flow, only a stall (no data for STREAM_IDLE_MS) aborts.
                     clearTimeout(timer);
@@ -203,12 +215,14 @@ export async function proxyChat(payload, res) {
                     return;
                 }
 
+                recordOutcome(true);
                 res.json(await upstream.json());
                 return;
             }
         }
         throw lastError || new LlmProxyError('The AI provider timed out.', { status: 504, code: 'llm_timeout' });
     } catch (err) {
+        recordOutcome(false, err?.message);
         if (err instanceof LlmProxyError) throw err;
         if (err.name === 'AbortError') {
             throw new LlmProxyError('The AI provider timed out.', { status: 504, code: 'llm_timeout' });
@@ -221,19 +235,47 @@ export async function proxyChat(payload, res) {
 
 export { ALLOWED_MODELS };
 
-// ── Reachability probe for /api/llm/status (cached; the route is public) ──
+// ── Health for /api/llm/status ──
+// "The endpoint answers" is not the same as "the AI works" (an endpoint can
+// list models yet reject every completion), so health comes from real
+// outcomes: the latest proxied request, or a one-token test completion when
+// there has been no traffic recently. Cached; the route is public.
+const health = { lastOkAt: 0, lastFailAt: 0, lastError: '' };
+export function recordOutcome(ok, error = '') {
+    if (ok) health.lastOkAt = Date.now();
+    else { health.lastFailAt = Date.now(); health.lastError = String(error).slice(0, 200); }
+}
+
 let probeCache = { at: 0, value: null };
-export async function probe() {
-    if (probeCache.value && Date.now() - probeCache.at < 60000) return probeCache.value;
-    const results = [];
+const RECENT_MS = 10 * 60 * 1000;
+
+async function testCompletion() {
     for (const baseUrl of endpoints()) {
-        try {
-            const r = await fetch(`${baseUrl}/models`, { headers: authHeaders(baseUrl), signal: AbortSignal.timeout(5000) });
-            results.push({ endpoint: baseUrl === BASE_URL ? 'primary' : 'fallback', ok: r.ok, status: r.status });
-        } catch (err) {
-            results.push({ endpoint: baseUrl === BASE_URL ? 'primary' : 'fallback', ok: false, status: 0 });
+        for (const model of ALLOWED_MODELS.length ? ALLOWED_MODELS : ['']) {
+            try {
+                const r = await fetch(`${baseUrl}/chat/completions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...authHeaders(baseUrl) },
+                    body: JSON.stringify({ model, ...modelParams(model), messages: [{ role: 'user', content: 'Reply with OK.' }], max_tokens: 16, stream: false }),
+                    signal: AbortSignal.timeout(15000),
+                });
+                if (r.ok) return { ok: true };
+            } catch { /* try next */ }
         }
     }
-    probeCache = { at: Date.now(), value: { reachable: results.some((r) => r.ok), endpoints: results } };
+    return { ok: false };
+}
+
+export async function probe() {
+    if (!isConfigured()) return { available: false, reason: 'unconfigured' };
+    const now = Date.now();
+    const latest = Math.max(health.lastOkAt, health.lastFailAt);
+    if (latest && now - latest < RECENT_MS) {
+        return { available: health.lastOkAt >= health.lastFailAt, reason: health.lastOkAt >= health.lastFailAt ? 'ok' : 'upstream_error', checkedAt: new Date(latest).toISOString() };
+    }
+    if (probeCache.value && now - probeCache.at < RECENT_MS) return probeCache.value;
+    const t = await testCompletion();
+    recordOutcome(t.ok, t.ok ? '' : 'test completion failed');
+    probeCache = { at: now, value: { available: t.ok, reason: t.ok ? 'ok' : 'upstream_error', checkedAt: new Date(now).toISOString() } };
     return probeCache.value;
 }

@@ -1007,7 +1007,8 @@ router.post('/llm/chat', llmLimiter, async (req, res) => {
 });
 
 router.get('/llm/status', async (req, res) => {
-    res.json({ configured: llmProxy.isConfigured(), models: llmProxy.ALLOWED_MODELS, ...(await llmProxy.probe()) });
+    // Model names are internal; the client only needs to know if AI works.
+    res.json({ configured: llmProxy.isConfigured(), ...(await llmProxy.probe()) });
 });
 
 // ── Web search proxy: keeps the Exa key server-side ──

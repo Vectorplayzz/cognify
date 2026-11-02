@@ -270,6 +270,24 @@ async function callAI(
 //  AIService Class
 // ════════════════════════════════════════════
 
+/**
+ * Pull a JSON array out of model output, tolerating code fences and the
+ * invalid backslash escapes models produce when they write LaTeX (\( \alpha).
+ */
+export function parseJsonArray(text: string): any[] | null {
+    const m = String(text || '').match(/\[[\s\S]*\]/);
+    if (!m) return null;
+    const attempts = [
+        m[0],
+        m[0].replace(/\\(?!["\\/bfnrtu])/g, '\\\\'),
+        m[0].replace(/\\(?!["\\/bfnrtu])/g, '\\\\').replace(/,\s*([\]}])/g, '$1'),
+    ];
+    for (const a of attempts) {
+        try { const v = JSON.parse(a); if (Array.isArray(v)) return v; } catch { /* next */ }
+    }
+    return null;
+}
+
 export class AIService {
 
     async getCodeExplanation(code: string, language: string): Promise<string> {
@@ -379,7 +397,7 @@ export class AIService {
     async generateLevelContent(topic: string, levelTitle: string, levelDescription: string): Promise<string> {
         return llamaChat({
             messages: [
-                { role: 'system', content: 'Write educational content with markdown (##, bullets, bold, code). 300-500 words with examples.' },
+                { role: 'system', content: 'Write educational content with markdown (bullets, bold, code). 300-500 words with examples. Start directly with the content: no title heading and no Course/Topic header lines. Use ## for sections. Write math as $...$ inline and $$...$$ for display, never \\( or \\[.' },
                 { role: 'user', content: `Theory for "${levelTitle}" (topic: "${topic}"). Context: ${levelDescription}. Include: explanation, key points, example, fun fact.` }
             ],
             temperature: 0.6,
@@ -393,7 +411,7 @@ export class AIService {
     ): Promise<string> {
         return llamaChatStream({
             messages: [
-                { role: 'system', content: 'Write educational content with markdown (##, bullets, bold, code). 300-500 words with examples.' },
+                { role: 'system', content: 'Write educational content with markdown (bullets, bold, code). 300-500 words with examples. Start directly with the content: no title heading and no Course/Topic header lines. Use ## for sections. Write math as $...$ inline and $$...$$ for display, never \\( or \\[.' },
                 { role: 'user', content: `Theory for "${levelTitle}" (topic: "${topic}"). Context: ${levelDescription}. Include: explanation, key points, example, fun fact.` }
             ],
             temperature: 0.6,
@@ -402,45 +420,49 @@ export class AIService {
     }
 
     async generateQuiz(topic: string, levelTitle: string): Promise<Array<{ question: string; options: string[]; correctIndex: number; explanation: string }>> {
-        const response = await llamaChat({
-            messages: [
-                { role: 'system', content: 'Generate quiz questions. Return ONLY a valid JSON array.' },
-                { role: 'user', content: `5 quiz questions about "${levelTitle}" (topic: "${topic}"). JSON: [{"question":"...","options":["a","b","c","d"],"correctIndex":0,"explanation":"..."}]. ONLY JSON.` }
-            ],
-            temperature: 0.5,
-            max_tokens: 1024,
-        });
-        try {
-            const m = response.match(/\[[\s\S]*\]/);
-            return JSON.parse(m ? m[0] : response);
-        } catch {
-            console.error('Failed to parse quiz:', response);
-            throw new Error('Failed to generate quiz.');
+        // Two attempts: models occasionally emit malformed JSON.
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const response = await llamaChat({
+                messages: [
+                    { role: 'system', content: 'Generate quiz questions. Return ONLY a valid JSON array. Write math in plain text or Unicode (e.g. x², √, λ), never LaTeX.' },
+                    { role: 'user', content: `5 multiple-choice questions about "${levelTitle}" (topic: "${topic}"). Exactly 4 options each. JSON: [{"question":"...","options":["a","b","c","d"],"correctIndex":0,"explanation":"..."}]. ONLY JSON.` }
+                ],
+                temperature: 0.5,
+                max_tokens: 2048,
+            });
+            const parsed = parseJsonArray(response);
+            const valid = (parsed || []).filter((q: any) =>
+                q && typeof q.question === 'string' && Array.isArray(q.options) && q.options.length >= 2
+                && Number.isInteger(q.correctIndex) && q.correctIndex >= 0 && q.correctIndex < q.options.length)
+                .map((q: any) => ({ question: q.question, options: q.options.map(String), correctIndex: q.correctIndex, explanation: String(q.explanation || '') }));
+            if (valid.length >= 3) return valid;
+            console.warn('[AI] quiz parse failed, attempt', attempt + 1);
         }
+        throw new Error('Failed to generate quiz.');
     }
 
     async generateSubtopics(topic: string, levelTitle: string, levelDescription: string): Promise<Array<{ title: string; description: string }>> {
-        const response = await llamaChat({
-            messages: [
-                { role: 'system', content: 'Break down a topic into subtopics. Return ONLY a valid JSON array.' },
-                { role: 'user', content: `Break "${levelTitle}" (course: "${topic}") into 4-6 subtopics. Context: ${levelDescription}. JSON: [{"title":"...","description":"..."}]. ONLY JSON.` }
-            ],
-            temperature: 0.6,
-            max_tokens: 1024,
-        });
-        try {
-            const m = response.match(/\[[\s\S]*\]/);
-            return JSON.parse(m ? m[0] : response);
-        } catch {
-            console.error('Failed to parse subtopics:', response);
-            throw new Error('Failed to generate subtopics.');
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const response = await llamaChat({
+                messages: [
+                    { role: 'system', content: 'Break down a topic into subtopics. Return ONLY a valid JSON array.' },
+                    { role: 'user', content: `Break "${levelTitle}" (course: "${topic}") into 4-6 subtopics. Context: ${levelDescription}. JSON: [{"title":"...","description":"..."}]. ONLY JSON.` }
+                ],
+                temperature: 0.6,
+                max_tokens: 1536,
+            });
+            const parsed = (parseJsonArray(response) || []).filter((x: any) => x && typeof x.title === 'string')
+                .map((x: any) => ({ title: x.title, description: String(x.description || '') }));
+            if (parsed.length) return parsed;
+            console.warn('[AI] subtopics parse failed, attempt', attempt + 1);
         }
+        throw new Error('Failed to generate subtopics.');
     }
 
     async generateSubtopicContent(topic: string, levelTitle: string, subtopicTitle: string, subtopicDescription: string): Promise<string> {
         return llamaChat({
             messages: [
-                { role: 'system', content: 'Write detailed educational content with markdown. 400-600 words with examples.' },
+                { role: 'system', content: 'Write detailed educational content with markdown. 400-600 words with examples. Start directly with the content: no title heading and no Course/Topic header lines. Use ## for sections. Write math as $...$ inline and $$...$$ for display, never \\( or \\[.' },
                 { role: 'user', content: `Content for "${subtopicTitle}" (level: "${levelTitle}", course: "${topic}"). Context: ${subtopicDescription}.` }
             ],
             temperature: 0.6,
@@ -454,7 +476,7 @@ export class AIService {
     ): Promise<string> {
         return llamaChatStream({
             messages: [
-                { role: 'system', content: 'Write detailed educational content with markdown. 400-600 words with examples.' },
+                { role: 'system', content: 'Write detailed educational content with markdown. 400-600 words with examples. Start directly with the content: no title heading and no Course/Topic header lines. Use ## for sections. Write math as $...$ inline and $$...$$ for display, never \\( or \\[.' },
                 { role: 'user', content: `Content for "${subtopicTitle}" (level: "${levelTitle}", course: "${topic}"). Context: ${subtopicDescription}.` }
             ],
             temperature: 0.6,
